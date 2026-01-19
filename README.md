@@ -30,10 +30,10 @@ pip install runtoolsio
 ```
 
 This installs all runtools components:
-- **runtools-runcore** - Core library for managing and monitoring jobs, defines runspec API
-- **runtools-runjob** - Job execution engine
-- **runtools-runcli** - CLI for running jobs
-- **runtools-taro** - CLI for managing and monitoring jobs
+- **[runtools-runcore](https://github.com/runtoolsio/runcore)** - Core library for managing and monitoring jobs, defines runspec API
+- **[runtools-runjob](https://github.com/runtoolsio/runjob)** - Job execution engine
+- **[runtools-runcli](https://github.com/runtoolsio/runcli)** - CLI for running jobs
+- **[runtools-taro](https://github.com/runtoolsio/taro)** - CLI for managing and monitoring jobs
 
 ## Individual Packages
 
