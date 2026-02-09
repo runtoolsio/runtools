@@ -17,6 +17,12 @@ dependencies = [
     "runtools-taro",
 ]
 
+[project.optional-dependencies]
+cli = ["runtools-runcli"]
+ops = ["runtools-taro"]
+core = ["runtools-runcore"]
+job = ["runtools-runjob"]
+
 [tool.flit.module]
 name = "runtools"
 

@@ -1,26 +1,24 @@
-# Runtools
+# runtools
 
-A lightweight toolkit for running, managing, and monitoring jobs.
+Lightweight job coordination, monitoring, and history for scripts and programs.
 
-## Why Runtools?
+Wrap any program with mutual exclusion, queuing, approvals, and observability — without deploying
+a full orchestration platform. No framework lock-in, no base classes to inherit, no decorators required.
 
-**No framework lock-in.** Unlike heavyweight job frameworks, Runtools doesn't dictate how you write your code. Your business logic stays clean and decoupled - no base classes to inherit, no decorators required, no framework-specific patterns to follow.
+## Quick Start
 
-**Run anything.** Any script, any command, any executable:
 ```bash
-run job ./my_script.py
-run job "python etl.py --date=2024-01-01"
-run job ./backup.sh
-```
+# Wrap a script with mutual exclusion and history
+run job --mutual-exclusion ./my-task.sh
 
-**Built for simplicity.** Perfect for batch jobs, cron tasks, and scripts that don't need the complexity of distributed job frameworks. If you're running scheduled tasks and want visibility into what's happening without adopting a complex infrastructure, Runtools is for you.
+# See what's running
+taro ps
 
-**Monitor and manage.** Track job status, view logs, check history - all from the command line:
-```bash
-taro ps           # View running jobs
-taro history      # Browse execution history
-taro tail JOB_ID  # Stream job output
-taro stop JOB_ID  # Stop a running job
+# See history
+taro history
+
+# Stop a running job
+taro stop my-task
 ```
 
 ## Installation
@@ -29,20 +27,47 @@ taro stop JOB_ID  # Stop a running job
 pip install runtoolsio
 ```
 
-This installs all runtools components:
-- **[runtools-runcore](https://github.com/runtoolsio/runcore)** - Core library for managing and monitoring jobs, defines runspec API
-- **[runtools-runjob](https://github.com/runtoolsio/runjob)** - Job execution engine
-- **[runtools-runcli](https://github.com/runtoolsio/runcli)** - CLI for running jobs
-- **[runtools-taro](https://github.com/runtoolsio/taro)** - CLI for managing and monitoring jobs
-
-## Individual Packages
-
-You can also install components separately:
+This installs all runtools components. You can also install selectively:
 
 ```bash
-pip install runtools-runcore  # Core library only
-pip install runtools-taro     # CLI only
+pip install runtoolsio[cli]   # Job wrapper CLI only (runcli + runjob + runcore)
+pip install runtoolsio[ops]   # Ops CLI only (taro + runcore)
+pip install runtoolsio[core]  # Core library only
+pip install runtoolsio[job]   # Execution library only (runjob + runcore)
 ```
+
+## Packages
+
+| Package | Description | Depends on |
+|---------|-------------|------------|
+| [**runcore**](https://github.com/runtoolsio/runcore) | Contracts/protocols, monitoring/control, SQLite persistence | — |
+| [**runjob**](https://github.com/runtoolsio/runjob) | Execution machinery (phases, instances, nodes) | runcore |
+| [**taro**](https://github.com/runtoolsio/taro) | Ops CLI (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `stats`) | runcore |
+| [**runcli**](https://github.com/runtoolsio/runcli) | Job wrapper CLI — wraps any program with coordination, monitoring, and history | runjob |
+
+## How It Works
+
+Jobs run inside **environments**. Jobs in the same environment can coordinate with each other
+(mutual exclusion, queuing, dependencies). Each environment can be accessed differently:
+
+- **In-process** — direct in-memory callbacks, for embedding in applications
+- **Local** — Unix domain sockets, for jobs on the same machine
+- **Distributed** (planned) — Redis, for jobs across machines
+
+### Coordination Phases
+
+Jobs are composed of **phases** that form a tree. The root phase lifecycle = job lifecycle.
+Coordination phases can be layered around your execution phase:
+
+- `MutualExclusion` — prevent concurrent execution
+- `ExecutionQueue` — queue jobs when limit is reached
+- `Checkpoint` / `Approval` — execution gates (manual or programmatic)
+- `Dependency` / `Waiting` — inter-job dependencies
+
+### Monitoring
+
+Phase transitions produce lifecycle events, dispatched to observers and connectors.
+The `taro` CLI connects to an environment and provides real-time and historical views.
 
 ## Documentation
 
