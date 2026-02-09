@@ -51,7 +51,7 @@ source runcore/venv/bin/activate && cd runcore && pytest
 - **Phase** — a unit of execution with lifecycle. **PhaseDetail** — immutable snapshot via `phase.detail()`.
   **PhaseControl** — wrapper providing control API access to a live Phase.
 - **Connector** — protocol for connecting to an environment (monitoring, control).
-- **Node** — represents a host running job instances.
+- **Node** — runtime implementation of an environment. Manages instances, coordinates jobs, dispatches events.
 - **Environment** — groups jobs into separate environments; jobs can coordinate only within the same environment.
   Access varies by implementation: `InProcessNode` (in-process), `LocalNode` (local sockets),
   distributed (TBI).
