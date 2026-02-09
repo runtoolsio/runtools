@@ -53,7 +53,7 @@ source runcore/venv/bin/activate && cd runcore && pytest
 - **Connector** — protocol for connecting to an environment (monitoring, control).
 - **Node** — represents a host running job instances.
 - **Environment** — groups jobs into separate environments; jobs can coordinate only within the same environment.
-  Access varies by implementation: `InProcessEnvironment` (in-process), `LocalNode` (local sockets),
+  Access varies by implementation: `InProcessNode` (in-process), `LocalNode` (local sockets),
   distributed (TBI).
 
 ## Phase System
