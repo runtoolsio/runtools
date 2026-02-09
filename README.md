@@ -48,10 +48,11 @@ pip install runtoolsio[job]   # Execution library only (runjob + runcore)
 ## How It Works
 
 Jobs run inside **environments**. Jobs in the same environment can coordinate with each other
-(mutual exclusion, queuing, dependencies). Each environment can be accessed differently:
+(mutual exclusion, queuing, dependencies). Each environment is implemented by a **node** that
+manages instances, coordinates jobs, and dispatches events:
 
-- **In-process** — direct in-memory callbacks, for embedding in applications
-- **Local** — Unix domain sockets, for jobs on the same machine
+- **In-process** (`InProcessNode`) — direct in-memory callbacks, for embedding in applications
+- **Local** (`LocalNode`) — Unix domain sockets, for jobs on the same machine
 - **Distributed** (planned) — Redis, for jobs across machines
 
 ### Coordination Phases
