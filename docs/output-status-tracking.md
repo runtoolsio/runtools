@@ -236,25 +236,25 @@ Then `run -k --kv-alias "count=completed" ./my-script.sh` will track it as:
 ## Data flow summary
 
 ```
-                    ┌─────────────────────────────────────┐
-                    │          Job Output                  │
-                    │  (stdout/stderr or logging.info())   │
-                    └──────────────┬──────────────────────┘
-                                   │
-                                   ▼
-                    ┌──────────────────────────────────────┐
-                    │           OutputSink                  │
-                    │  ┌────────────────────────────────┐  │
-                    │  │ ParsingPreprocessor (optional)  │  │
-                    │  │  └─ KVParser / IndexParser      │  │
-                    │  └────────────────────────────────┘  │
-                    └──────────┬───────────┬───────────────┘
-                               │           │
-                    ┌──────────▼──┐  ┌─────▼──────────┐
-                    │StatusTracker│  │ OutputRouter    │
-                    │             │  │ (tail buffer,   │
-                    │ .to_status()│  │  file storage)  │
-                    └─────────────┘  └────────────────┘
+         ┌──────────────────────────────────────┐
+         │            Job Output                │
+         │  (stdout/stderr or logging.info())   │
+         └─────────────────┬────────────────────┘
+                           │
+                           ▼
+         ┌──────────────────────────────────────┐
+         │            OutputSink                │
+         │  ┌────────────────────────────────┐  │
+         │  │ ParsingPreprocessor (optional) │  │
+         │  │  └─ KVParser / IndexParser     │  │
+         │  └────────────────────────────────┘  │
+         └───────────┬──────────┬───────────────┘
+                     │          │
+         ┌───────────▼──┐  ┌───▼──────────────┐
+         │StatusTracker │  │ OutputRouter     │
+         │              │  │ (tail buffer,    │
+         │ .to_status() │  │  file storage)   │
+         └──────────────┘  └──────────────────┘
 ```
 
 ## Source files
