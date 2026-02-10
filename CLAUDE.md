@@ -1,22 +1,5 @@
 # Claude Code Guidelines
 
-## Allowed Commands
-```toml
-# Read-only exploration commands - auto-allow
-allow = [
-  "wc *",
-  "find *",
-  "ls *",
-  "tree *",
-  "du *",
-  "file *",
-  "head *",
-  "tail *",
-  "stat *",
-  "awk *",
-]
-```
-
 ## Principles
 - `Style`: Line length 120. Google-style docstrings.
 - `Error handling`: Never catch bare Exception.
