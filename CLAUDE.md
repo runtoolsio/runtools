@@ -54,43 +54,9 @@ source runcore/venv/bin/activate && cd runcore && pytest
 - **Node** — runtime implementation of an environment. Manages instances, coordinates jobs, dispatches events.
 - **Environment** — groups jobs into separate environments; jobs can coordinate only within the same environment.
   Access varies by implementation: `InProcessNode` (in-process), `LocalNode` (local sockets),
-  distributed (TBI).
+  distributed (TBI - Redis).
 
 ## Phase System
 
 - The root phase lifecycle = job lifecycle. When the root phase completes, the job completes.
-- Phase tree: `SequentialPhase` runs children in order; phases compose as a tree.
-- Coordination phases: `MutualExclusion`, `ExecutionQueue`, `Checkpoint`, `Approval`, `Dependency`, `Waiting`.
-- Composition via decoration: layers wrap the execution phase.
-  Example: `TimeoutExtension` → `SequentialPhase` → `ExecutionQueue` → `ProgramPhase`.
-- `PhaseTerminated(status)` exception signals non-COMPLETED termination.
 - `run_child(child)` — always use instead of `child.run(ctx)` directly (wires observers, registers children).
-
-## Event & IPC Model
-
-- Event flow: Phase transitions → instance lifecycle events → dispatched to observers → Connectors.
-- **In-process environment**: direct in-memory callbacks (no IPC).
-- **Local environment**: JSON-RPC over Unix domain sockets (request/response) + datagram sockets for event streaming.
-- **Distributed environment**: This is a planned feature to be implemented using Redis.
-- **Authentication**: Not implemented. Assumes a trusted network environment (e.g., VPC).
-  Redis ACLs can be layered on via environment config if needed in the future.
-
-## Key Files
-
-**runcore** (`runcore/src/runtools/runcore/`):
-- `run.py` — run data model (JobRun, RunState)
-- `job.py` — job definition and matching
-- `env.py` — environment protocol and implementations
-- `connector.py` — connector protocol for remote monitoring/control
-
-**runjob** (`runjob/src/runtools/runjob/`):
-- `phase.py` — phase base classes and coordination phases
-- `instance.py` — job instance lifecycle
-- `node.py` — node implementation (local execution host)
-- `coord.py` — coordination primitives
-
-**taro** (`taro/src/runtools/taro/`):
-- `main.py` — CLI entry point and command dispatch
-
-**runcli** (`runcli/src/runtools/runcli/`):
-- `cli.py` — CLI entry point for job wrapping
