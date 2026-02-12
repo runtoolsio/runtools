@@ -3,6 +3,7 @@
 ## Principles
 - `Style`: Line length 120. Google-style docstrings.
 - `Error handling`: Never catch bare Exception.
+- `Project stage`: Pre-beta — backward compatibility is not required.
 
 ## Running Tests
 Each subproject has its own virtual environment. To run tests:
