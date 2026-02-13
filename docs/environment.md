@@ -113,14 +113,35 @@ taro env --all
 
 The output is the fully resolved TOML configuration, useful for verifying which files took effect.
 
+## Environments Without Config
+
+Environments created at runtime with `node.local("myenv")` derive their socket paths and database
+location deterministically from the environment ID — no config file is needed.
+
+Taro commands use `connector.connect(env_id)` which tries config first and falls back to the same
+deterministic layout derivation. This means commands like `taro ps -e myenv` work even when there
+is no config entry for `myenv`:
+
+```bash
+# Works even without a config entry for "demo"
+taro ps -e demo
+taro stop -e demo "*"
+taro history -e demo
+```
+
+The fallback only applies to explicitly named environments. The default environment (used when
+`-e` is omitted) always requires config.
+
 ## Usage in Code
 
 ```python
+from runtools.runcore import connector
+
+# Connect to an environment (config-based or derived layout)
+with connector.connect("myenv") as conn:
+    runs = conn.get_active_runs()
+
+# Load environment config explicitly
 from runtools.runcore.env import get_env_config
-
-# Load default environment
-env_config = get_env_config()
-
-# Load specific environment by ID
 env_config = get_env_config("myproject")
 ```

@@ -23,7 +23,7 @@ class MyPipeline(BasePhase):
         data = fetch("http://example.com")
         return transform(data["items"])
 
-    def _stop_started_run(self, reason):
+    def _stop_running(self, reason):
         pass
 ```
 
