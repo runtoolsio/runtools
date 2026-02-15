@@ -173,7 +173,7 @@ inst = instance.create(instance_id, env, root_phase, output_sink=sink)
 inst.run()
 
 # StatusTracker was auto-wired — status available via:
-run = inst.to_run()
+run = inst.snap()
 print(run.status)  # Status snapshot from the auto-created tracker
 ```
 
