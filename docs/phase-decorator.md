@@ -30,9 +30,8 @@ class MyPipeline(BasePhase):
 ## Decorator Variants
 
 ```python
-@phase                          # type auto-derived: fetch_data -> FETCH_DATA
-@phase("CUSTOM")                # explicit type
-@phase(phase_type="CUSTOM")     # keyword form
+@phase  # phase_id = function name, type = FUNCTION
+@phase(phase_id="ETL")  # explicit phase_id override
 ```
 
 ## Nesting
