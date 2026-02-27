@@ -11,7 +11,7 @@ with separate virtual environments.
 
 - **runcore** — Contracts/protocols, monitoring/control, SQLite persistence. For apps that watch/control jobs.
 - **runjob** — Execution machinery (phases, instances, nodes). For apps that run jobs.
-- **taro** — Ops CLI built on runcore (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `stats`).
+- **taro** — Ops CLI + TUI built on runcore (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `stats`, `dash`).
 - **runcli** — Job wrapper CLI built on runjob. Wraps any program with coordination, monitoring, and history.
 
 ### Dependencies
@@ -63,6 +63,16 @@ Pre-beta — backward compatibility is not required.
 - **Environment** — groups jobs into separate environments; jobs can coordinate only within the same environment.
   Access varies by implementation: `InProcessNode` (in-process), `LocalNode` (local sockets),
   distributed (TBI - Redis).
+
+## TUI (`taro/tui/`)
+
+Textual-based terminal UI. See `taro/docs/tui.md` for full architecture.
+
+- **`taro dash`** — Live dashboard (active + history tables). `DashboardApp` → `DashboardScreen`.
+- **`taro history`** — Interactive history table (default), `--no-pager` for plain text output.
+- **Instance detail** — `InstanceScreen` with header, phase tree, phase detail, output panel.
+- **Selector** — `select_instance()` modal for action commands.
+- Shared table helpers in `tui/selector.py`: `add_columns`, `build_cells`, `row_key`, `LinkedTable`.
 
 ## Phase System
 
