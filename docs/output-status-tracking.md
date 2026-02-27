@@ -25,11 +25,11 @@ print(tracker.to_status())  # done  (!Disk almost full)
 | `event(text)`             | Set the current event (replaces previous)          |
 | `operation(name)`         | Get or create a named `OperationTracker`           |
 | `warning(text)`           | Append a warning (all warnings are kept)           |
-| `result(text)`            | Set the final result and deactivate all operations |
+| `result(text)`            | Set the final result                               |
 | `to_status()`             | Return an immutable `Status` snapshot              |
 
-`OperationTracker.update(completed, total, unit)` updates progress. If the new `completed` value
-is greater than the current one, it's treated as an absolute value; otherwise as an increment.
+`OperationTracker.update(completed, total, unit)` updates progress. `completed` is always
+treated as an absolute value (total done so far, not an increment).
 
 > **Package:** `runtools.runjob.track`
 
@@ -48,8 +48,8 @@ status.result            # Event("done", <timestamp>)
 
 `Status.__str__()` formats a human-readable status line:
 
-- Active operations shown as `[name completed/total (pct%)]`
-- If no active operations, the last event text is shown
+- Unfinished operations shown as `[name completed/total (pct%)]`
+- If no unfinished operations, the last event text is shown
 - If a result is set, it replaces everything
 - Warnings are appended as `(!warning1, warning2)`
 
@@ -87,7 +87,7 @@ line = OutputLine("some message", ordinal=1, fields={"event": "started", "comple
 
 ```python
 tracker = StatusTracker()
-tracker.new_output(OutputLine("msg", ordinal=1, fields={"event": "upload", "completed": 5, "total": 10}))
+tracker.new_output(OutputLine("msg", ordinal=1, fields={"operation": "upload", "completed": 5, "total": 10}))
 
 print(tracker.to_status())  # [upload 5/10 (50%)]
 ```
@@ -98,15 +98,35 @@ The default handler (`combined_output_handler`) works as follows:
 
 **Recognized field names:**
 
-| Field       | Effect                                                           |
-|-------------|------------------------------------------------------------------|
-| `event`     | Sets the current event; also used as operation name if progress fields are present |
-| `operation` | Explicit operation name (takes precedence over `event` for naming operations)      |
-| `completed` | Completed count for the operation                                |
-| `total`     | Total count for the operation                                    |
-| `unit`      | Unit label for the operation (e.g., "files", "MB")               |
-| `result`    | Sets the final result                                            |
-| `timestamp` | Timestamp for the update (defaults to now)                       |
+| Field       | Effect                                                                        |
+|-------------|-------------------------------------------------------------------------------|
+| `event`     | Sets the current event (standalone status message)                            |
+| `operation` | Operation name — identifies a tracked operation                               |
+| `completed` | Absolute completed count for the operation (always total done, not increment) |
+| `total`     | Total count for the operation                                                 |
+| `unit`      | Unit label for the operation (e.g., "files", "MB")                            |
+| `result`    | Sets the final result (also serves as end signal for operations)              |
+| `timestamp` | Timestamp for the update (defaults to now)                                    |
+
+**Two operation models:**
+
+Operations can track progress or just lifecycle (start/end).
+
+*Progress model* — report `completed`/`total`, finishes implicitly when `completed >= total`:
+
+```
+operation=[download] completed=[5] total=[100] unit=[files]
+operation=[download] completed=[100] total=[100] unit=[files]
+```
+
+*Lifecycle model* — no progress, just start and end via `result`:
+
+```
+operation=[compile]
+operation=[compile] result=[done]
+```
+
+Both models can use an explicit `result` to end the operation at any point.
 
 ## 5. Parsing text into fields — KVParser + ParsingPreprocessor
 
@@ -119,9 +139,9 @@ from runtools.runjob.output import ParsingPreprocessor, OutputSink
 
 preprocessor = ParsingPreprocessor([KVParser()])
 
-line = OutputLine("event=[downloading] completed=[5] total=[10]", ordinal=1)
+line = OutputLine("operation=[downloading] completed=[5] total=[10]", ordinal=1)
 parsed = preprocessor(line)
-# parsed.fields == {'event': 'downloading', 'completed': '5', 'total': '10'}
+# parsed.fields == {'operation': 'downloading', 'completed': '5', 'total': '10'}
 ```
 
 `KVParser` supports bracket-wrapped values (`key=[value]`, `key=<value>`, `key=(value)`) by default.
@@ -195,7 +215,7 @@ with `extra` fields. The `OutputSink` log handler extracts extras automatically 
 import logging
 log = logging.getLogger("my_job")
 
-log.info("progress", extra={"event": "upload", "completed": 45, "total": 100})
+log.info("progress", extra={"operation": "upload", "completed": 45, "total": 100})
 # OutputSink's log handler extracts extras → OutputLine.fields automatically
 # No KVParser needed — fields are already structured
 ```
@@ -225,7 +245,7 @@ but the tracker expects `completed`).
 So if your script prints:
 
 ```
-event=[downloading] count=[5] total=[10]
+operation=[downloading] count=[5] total=[10]
 ```
 
 Then `run -k --kv-alias "count=completed" ./my-script.sh` will track it as:
