@@ -115,12 +115,11 @@ The output is the fully resolved TOML configuration, useful for verifying which 
 
 ## Environments Without Config
 
-Environments created at runtime with `node.local("myenv")` derive their socket paths and database
-location deterministically from the environment ID — no config file is needed.
+Both `node.connect(env_id)` and `connector.connect(env_id)` try config first and fall back to a
+default `LocalEnvironmentConfig` when no config entry exists. The socket paths and database location
+are derived deterministically from the environment ID — no config file is needed.
 
-Taro commands use `connector.connect(env_id)` which tries config first and falls back to the same
-deterministic layout derivation. This means commands like `taro ps -e myenv` work even when there
-is no config entry for `myenv`:
+This means commands like `taro ps -e myenv` work even when there is no config entry for `myenv`:
 
 ```bash
 # Works even without a config entry for "demo"
@@ -136,12 +135,26 @@ The fallback only applies to explicitly named environments. The default environm
 
 ```python
 from runtools.runcore import connector
+from runtools.runcore.env import LocalEnvironmentConfig
 
-# Connect to an environment (config-based or derived layout)
+# Connect to an environment (config lookup with local fallback)
 with connector.connect("myenv") as conn:
     runs = conn.get_active_runs()
 
-# Load environment config explicitly
-from runtools.runcore.env import get_env_config
-env_config = get_env_config("myproject")
+# Create from explicit config
+with connector.create(LocalEnvironmentConfig(id="myenv")) as conn:
+    runs = conn.get_active_runs()
+```
+
+```python
+from runtools.runjob import node
+from runtools.runcore.env import LocalEnvironmentConfig
+
+# Create a node (config lookup with local fallback)
+with node.connect("myenv") as env:
+    inst = env.create_instance(...)
+
+# Create from explicit config
+with node.create(LocalEnvironmentConfig(id="myenv")) as env:
+    inst = env.create_instance(...)
 ```

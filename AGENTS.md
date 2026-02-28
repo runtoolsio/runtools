@@ -62,7 +62,9 @@ Pre-beta — backward compatibility is not required.
 - **Node** — runtime implementation of an environment. Manages instances, coordinates jobs, dispatches events.
 - **Environment** — groups jobs into separate environments; jobs can coordinate only within the same environment.
   Access varies by implementation: `InProcessNode` (in-process), `LocalNode` (local sockets),
-  distributed (TBI - Redis).
+  distributed (TBI - Redis). Public entry points: `connect(env_id)` (config lookup with local fallback)
+  and `create(env_config)` (explicit config). Type-specific factories (`_local`, `_in_process`) are private —
+  the `EnvironmentConfig` Pydantic model is the single source of truth for defaults.
 
 ## TUI (`taro/tui/`)
 
