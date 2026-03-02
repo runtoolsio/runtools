@@ -18,7 +18,7 @@ with separate virtual environments.
 
 - runjob --> runcore
 - taro --> runcore
-- runcli --> runjob
+- runcli --> runjob, runcore
 
 ## Build and Test Commands
 
