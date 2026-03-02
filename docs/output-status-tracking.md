@@ -83,7 +83,7 @@ line = OutputLine("some message", ordinal=1, fields={"event": "started", "comple
 ## 4. Connecting output to status — StatusTracker as observer
 
 `StatusTracker` implements `OutputObserver`. When it receives an `OutputLine`, its built-in
-`combined_output_handler` reads the `fields` dict and updates the tracker automatically:
+`field_based_handler` reads the `fields` dict and updates the tracker automatically:
 
 ```python
 tracker = StatusTracker()
@@ -92,9 +92,8 @@ tracker.new_output(OutputLine("msg", ordinal=1, fields={"operation": "upload", "
 print(tracker.to_status())  # [upload 5/10 (50%)]
 ```
 
-The default handler (`combined_output_handler`) works as follows:
-- If the line has `fields` — extract status from them (via `field_based_handler`)
-- Otherwise — treat the entire `message` as an event
+The default handler (`field_based_handler`) only processes lines that have structured `fields`.
+Lines without fields are ignored — no implicit status updates from plain text.
 
 **Recognized field names:**
 
