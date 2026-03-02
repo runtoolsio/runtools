@@ -23,6 +23,10 @@ ops = ["runtoolsio-taro>=0.1,<0.2"]
 core = ["runtoolsio-runcore>=0.1,<0.2"]
 job = ["runtoolsio-runjob>=0.1,<0.2"]
 
+[project.scripts]
+run = "runtools.runcli:main_cli"
+taro = "runtools.taro.main:run"
+
 [tool.flit.module]
 name = "runtools"
 
