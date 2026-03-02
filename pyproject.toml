@@ -8,20 +8,20 @@ authors = [{name = "Stan Svec", email = "dev@stansvec.com"}]
 readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = ["License :: OSI Approved :: MIT License"]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dynamic = ["version", "description"]
 dependencies = [
-    "runtools-runcore",
-    "runtools-runjob",
-    "runtools-runcli",
-    "runtools-taro",
+    "runtoolsio-runcore>=0.1,<0.2",
+    "runtoolsio-runjob>=0.1,<0.2",
+    "runtoolsio-runcli>=0.1,<0.2",
+    "runtoolsio-taro>=0.1,<0.2",
 ]
 
 [project.optional-dependencies]
-cli = ["runtools-runcli"]
-ops = ["runtools-taro"]
-core = ["runtools-runcore"]
-job = ["runtools-runjob"]
+cli = ["runtoolsio-runcli>=0.1,<0.2"]
+ops = ["runtoolsio-taro>=0.1,<0.2"]
+core = ["runtoolsio-runcore>=0.1,<0.2"]
+job = ["runtoolsio-runjob>=0.1,<0.2"]
 
 [tool.flit.module]
 name = "runtools"
