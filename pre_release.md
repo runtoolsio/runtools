@@ -15,29 +15,7 @@ architecture. Estimated 2-3 focused days to clear the blockers.
 
 These affect multiple packages and must be fixed first.
 
-### 1. Broken dependency metadata (RELEASE BLOCKER)
-
-Isolated `pip install` will fail with `ModuleNotFoundError`:
-
-- `runjob/pyproject.toml` — `runtools-runcore` is **commented out**
-- `runcli/pyproject.toml` — declares only `rich-argparse`, missing both `runcore` and `runjob`
-- `taro/pyproject.toml` — `runtools-runcore` is **commented out**
-
-### 2. Python version floor mismatch (RELEASE BLOCKER)
-
-`runjob` declares `>=3.10` but uses:
-
-- `typing.override` (3.12+) in `instance.py`, `node.py`, `server.py`
-- `ExceptionGroup` handling (3.11+) in `instance.py`
-
-Fix: bump to `>=3.12` or add `typing_extensions` fallback.
-
-### 3. No CLI entry points (HIGH)
-
-Neither `runcli` nor `taro` define `[project.scripts]` in `pyproject.toml`. Users must use
-`python -m runtools.runcli` instead of `run job ...`.
-
-### 4. Zero tests in runcli and taro (HIGH)
+### 1. Zero tests in runcli and taro (HIGH)
 
 Both `test/` directories are empty. At minimum need smoke tests for CLI parsing and basic integration.
 
@@ -147,8 +125,6 @@ overflow tests.
 
 | Priority | Issue | Detail |
 |----------|-------|--------|
-| BLOCKER | Missing dependencies in pyproject.toml | Only declares `rich-argparse` — missing `runcore` and `runjob` |
-| BLOCKER | No `[project.scripts]` entry point | Can't run as `run job ...` |
 | HIGH | Zero tests | Empty test directory |
 | HIGH | `-p/--grok-pattern` declared but not implemented | Flag silently accepts but ignores patterns. Remove or guard with error |
 | MEDIUM | `ACTION_SERVICE` constant unused | Forward declaration with no implementation — confusing |
@@ -189,17 +165,14 @@ overflow tests.
 
 In priority order:
 
-1. **Fix dependency metadata** in all `pyproject.toml` files (~30 min)
-2. **Bump `requires-python`** to `>=3.12` in runjob (or add compatibility shims) (~15 min)
-3. **Add `[project.scripts]`** entry points for runcli and taro (~15 min)
-4. **Remove or guard `-p/--grok-pattern`** in runcli (~15 min)
-5. **Add public API exports** to `__init__.py` in runcore and runjob (~2-4 hours)
-6. **Add smoke tests** for runcli (CLI parsing, basic job execution) and taro (command smoke tests) (~4-8 hours)
-7. **Fix thread exception leak** in runjob's exec queue tests (~1-2 hours)
-8. **Document pattern matching behavior** per taro command (~1 hour)
+1. **Remove or guard `-p/--grok-pattern`** in runcli (~15 min)
+2. **Add public API exports** to `__init__.py` in runcore and runjob (~2-4 hours)
+3. **Add smoke tests** for runcli (CLI parsing, basic job execution) and taro (command smoke tests) (~4-8 hours)
+4. **Fix thread exception leak** in runjob's exec queue tests (~1-2 hours)
+5. **Document pattern matching behavior** per taro command (~1 hour)
 
-Items 1-4 are mechanical fixes. Item 5 is the most impactful design decision — it defines the public contract.
-Items 6-8 are quality gates.
+Item 2 is the most impactful design decision — it defines the public contract.
+Items 3-5 are quality gates.
 
 ---
 
