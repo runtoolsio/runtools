@@ -48,6 +48,13 @@ source runcore/venv/bin/activate && cd runcore && pytest
 - Avoid broad `Exception`; allow it only at process/observer boundaries with explicit handling
 - Test behaviour not implementation — pytest with BDD-ish style
 
+## Versioning & Deployment
+
+- Bump patch version in each changed package before deploying.
+- Independent patch versions between releases; lockstep bumps only for public releases.
+- Version files: `runcore/__init__.py`, `runjob/__init__.py`, `runcli/__version__.py`, `taro/__init__.py`.
+- Deploy: `./push.sh runcore runcli` (build + upload selected packages to internal PyPI).
+
 ## Project Stage
 
 Pre-beta — backward compatibility is not required.
