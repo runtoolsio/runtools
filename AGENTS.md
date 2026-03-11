@@ -22,14 +22,13 @@ with separate virtual environments.
 
 ## Build and Test Commands
 
-Each subproject has its own virtual environment. To run tests:
+Each subproject has its own virtual environment under `<package>/venv/`. Run tests by invoking the venv Python directly — no activation needed:
 
 ```bash
-# runjob tests (includes integration tests)
-source runjob/venv/bin/activate && cd runjob && pytest
-
-# runcore tests
-source runcore/venv/bin/activate && cd runcore && pytest
+# From the runtools root directory:
+runcore/venv/bin/python -m pytest runcore/test/ -v
+runjob/venv/bin/python -m pytest runjob/test/ -v
+taro/venv/bin/python -m pytest taro/test/ -v
 ```
 
 ## Coding Standards
