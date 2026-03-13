@@ -11,6 +11,17 @@ The main UX goal is:
 - show retries/re-runs cleanly in history
 - track duplicate submissions without losing observability
 
+## Current State
+
+The identity foundation is now in place:
+
+- `InstanceID` has first-class `ordinal`
+- `job_id + run_id` is treated as the logical run key
+- persistence uniqueness is based on `(job_id, run_id, ordinal)`
+- exact matching/removal paths carry ordinal
+- output files are separated per concrete execution
+
+The remaining work is duplicate admission, retry/rerun orchestration, and history/CLI/TUI presentation.
 
 ## Core Model
 
@@ -179,14 +190,12 @@ History UX goal:
 
 Duplicates can be shown as a count, with drill-down/detail later if needed.
 
+## Remaining Implementation Direction
 
-## Immediate Implementation Direction
-
-1. Extend `InstanceID` to include first-class `ordinal` support.
-2. Treat `job_id + run_id` as the logical grouping key, not the fully unique execution identity.
-3. Add an auxiliary duplicates table with logical run key + timestamp (+ optional reason/source).
-4. Keep duplicate detection in `node.create_instance(...)`.
-5. Move toward persistence-first admission, then instance construction.
-6. Introduce a node-level `InstanceComponentProvider`-style object for recreatable runtime parts.
-7. Add a dedicated node retry entry point that resolves the next ordinal first and only then creates the
+1. Add an auxiliary duplicates table with logical run key + timestamp (+ optional reason/source).
+2. Keep duplicate detection in `node.create_instance(...)`.
+3. Move toward persistence-first admission, then instance construction.
+4. Introduce a node-level `InstanceComponentProvider`-style object for recreatable runtime parts.
+5. Add a dedicated node retry entry point that resolves the next ordinal first and only then creates the
    concrete `JobInstance`.
+6. Surface repeated executions cleanly in history, CLI, and TUI, showing ordinal only when it adds value.
