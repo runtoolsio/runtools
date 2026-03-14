@@ -195,7 +195,6 @@ Duplicates can be shown as a count, with drill-down/detail later if needed.
 1. Add an auxiliary duplicates table with logical run key + timestamp (+ optional reason/source).
 2. Keep duplicate detection in `node.create_instance(...)`.
 3. Move toward persistence-first admission, then instance construction.
-4. Introduce a node-level `InstanceComponentProvider`-style object for recreatable runtime parts.
-5. Add a dedicated node retry entry point that resolves the next ordinal first and only then creates the
+4. Add a dedicated node retry entry point that resolves the next ordinal first and only then creates the
    concrete `JobInstance`.
-6. Surface repeated executions cleanly in history, CLI, and TUI, showing ordinal only when it adds value.
+5. Surface repeated executions cleanly in history, CLI, and TUI, showing ordinal only when it adds value.
