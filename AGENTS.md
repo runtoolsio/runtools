@@ -7,6 +7,24 @@
 Runtools is a mono-repo for a Python job execution and coordination framework. It consists of four packages
 with separate virtual environments.
 
+## Repository Layout
+
+The current working directory may be a package or meta-package subdirectory, not the coordination root.
+
+Typical local layout:
+
+- `<workspace-root>/runcore/`
+- `<workspace-root>/runjob/`
+- `<workspace-root>/runcli/`
+- `<workspace-root>/taro/`
+- `<workspace-root>/runtools/` — meta-package repo
+
+Agent rule:
+
+- If asked to work on `runcore`, `runjob`, `runcli`, or `taro`, first check sibling directories under the parent workspace before concluding the code is missing.
+- Do not assume the current `cwd` contains all package sources.
+- When reviewing, testing, or editing package-specific code, work in the actual package directory.
+
 ## Packages
 
 - **runcore** — Contracts/protocols, monitoring/control, SQLite persistence. For apps that watch/control jobs.
