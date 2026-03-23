@@ -15,5 +15,9 @@
 
 ## Important
 
+- Add `OutputLine.status_type` derived property.
+  Returns `'operation'`, `'event'`, or `'result'` based on parsed fields, `None` otherwise.
+  Enables output views (tail, TUI panels) to filter out status-tracking lines from user-visible output.
+
 - Document `taro` pattern-matching behavior per command.
   Current behavior differs between commands such as `history`, `ps`, `wait`, and `of`.
