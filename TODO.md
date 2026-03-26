@@ -15,9 +15,13 @@
 
 ## Important
 
-- Filter `is_op_update` lines from output views by default.
-  `OutputLine.is_op_update` is implemented — wire it into `taro tail`, TUI output panel, and dashboard output.
-  Add a detail-level toggle (`v` key) to cycle visibility: compact (hide op updates + scoped ops + zero-total ops) → full.
+- Fix output source (`_current_phase`) not propagating to child threads.
+  `ContextVar` doesn't auto-propagate to threads spawned by phases. Output from `ThreadPoolExecutor` workers
+  in `FunctionPhase` gets `source=None`. Consider replacing the context var approach with a `default_source`
+  on `OutputSink` that's set when the phase starts, so all threads sharing the sink get the correct source.
+
+- Filter `is_op_update` lines from `taro tail` and dashboard output views.
+  TUI instance detail already filters via `v` toggle — extend to other output views.
 
 - Document `taro` pattern-matching behavior per command.
   Current behavior differs between commands such as `history`, `ps`, `wait`, and `of`.
