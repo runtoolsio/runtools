@@ -20,15 +20,28 @@
   in `FunctionPhase` gets `source=None`. Consider replacing the context var approach with a `default_source`
   on `OutputSink` that's set when the phase starts, so all threads sharing the sink get the correct source.
 
-- Support dual output representation for clean vs verbose rendering.
-  Keep `OutputLine.message` as the logical/plain message used by default in TUI/history/output files.
-  Add an optional secondary display field for richer rendered output from logging capture (for example a
-  formatted prefix or alternate rendered text) without replacing the primary message.
-  Use verbose mode in `taro` to show the richer representation when present.
-  Goals:
-  - keep normal output clean and consistent
-  - avoid duplicating full formatted lines when only a prefix/extra context is needed
-  - preserve room for richer diagnostics without coupling default output to external logger formatting
+- Structured output as the default model.
+  Redesign `OutputLine` / JSONL around a canonical structured event shape instead of `fields` plus formatter-driven rendering.
+  Normalize common envelope fields across logging integrations:
+  - `ts`
+  - `level`
+  - `logger`
+  - `msg`
+  Keep application data flat at top level. Treat `rt_*` as tracking-only ingestion metadata rather than normal output fields.
+
+- Render structured output in `taro`.
+  Replace the current formatter/template-based verbose rendering with presentation derived from structured fields.
+  Define a stable display policy:
+  - normal mode shows `msg`
+  - verbose mode composes richer output from `ts`, `level`, `logger`, and selected extra fields
+  Keep tracking metadata out of normal output rendering.
+
+- Improve `runcli` parsing into the same structured model.
+  Add explicit parsing layers for external program output:
+  - JSON line objects
+  - `k=v` / logfmt
+  - common text log patterns used in practice (including Java-style formats)
+  Normalize recognized fields into the canonical output shape and fall back to plain `msg` on low-confidence input.
 
 - Document `taro` pattern-matching behavior per command.
   Current behavior differs between commands such as `history`, `ps`, `wait`, and `of`.
