@@ -20,23 +20,15 @@
   in `FunctionPhase` gets `source=None`. Consider replacing the context var approach with a `default_source`
   on `OutputSink` that's set when the phase starts, so all threads sharing the sink get the correct source.
 
-- Structured output as the default model.
-  Redesign `OutputLine` / JSONL around a canonical structured event shape instead of `fields` plus formatter-driven rendering.
-  Normalize common envelope fields across logging integrations:
-  - `ts`
-  - `level`
-  - `logger`
-  - `msg`
-  Keep application data flat at top level. Treat `rt_*` as tracking-only ingestion metadata rather than normal output fields.
-
 - Render structured output in `taro`.
-  Replace the current formatter/template-based verbose rendering with presentation derived from structured fields.
+  Part 2. Replace the current formatter/template-based verbose rendering with presentation derived from structured fields.
   Define a stable display policy:
   - normal mode shows `msg`
   - verbose mode composes richer output from `ts`, `level`, `logger`, and selected extra fields
   Keep tracking metadata out of normal output rendering.
 
 - Improve `runcli` parsing into the same structured model.
+  Part 3.
   Add explicit parsing layers for external program output:
   - JSON line objects
   - `k=v` / logfmt
