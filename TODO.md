@@ -20,20 +20,13 @@
   in `FunctionPhase` gets `source=None`. Consider replacing the context var approach with a `default_source`
   on `OutputSink` that's set when the phase starts, so all threads sharing the sink get the correct source.
 
-- Render structured output in `taro`.
-  Part 2. Replace the current formatter/template-based verbose rendering with presentation derived from structured fields.
-  Define a stable display policy:
-  - normal mode shows `msg`
-  - verbose mode composes richer output from `ts`, `level`, `logger`, and selected extra fields
-  Keep tracking metadata out of normal output rendering.
-
-- Improve `runcli` parsing into the same structured model.
-  Part 3.
-  Add explicit parsing layers for external program output:
-  - JSON line objects
-  - `k=v` / logfmt
-  - common text log patterns used in practice (including Java-style formats)
-  Normalize recognized fields into the canonical output shape and fall back to plain `msg` on low-confidence input.
+- Define and document reserved-key / collision handling across structured logging and output.
+  Cover all related paths consistently:
+  - `OutputLine.serialize()` and stored JSONL envelope keys
+  - `runcli` `JsonFormatter`
+  - dict/JSON ingestion in `StdLogOutputLink` and `OutputParser`
+  Decide a single policy for collisions with canonical keys (`msg/ts/lvl/logger/...` or underscored storage variants):
+  reject, drop, rename, or namespace conflicting user fields.
 
 - Document `taro` pattern-matching behavior per command.
   Current behavior differs between commands such as `history`, `ps`, `wait`, and `of`.
