@@ -29,7 +29,7 @@ Agent rule:
 
 - **runcore** — Contracts/protocols, monitoring/control, SQLite persistence. For apps that watch/control jobs.
 - **runjob** — Execution machinery (phases, instances, nodes). For apps that run jobs.
-- **taro** — Ops CLI + TUI built on runcore (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `stats`, `dash`).
+- **taro** — Ops CLI + TUI built on runcore (`ps`, `jobs`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `output`, `dash`).
 - **runcli** — Job wrapper CLI built on runjob. Wraps any program with coordination, monitoring, and history.
 
 ### Dependencies
@@ -94,9 +94,16 @@ Pre-beta — backward compatibility is not required.
 
 Textual-based terminal UI. See `taro/docs/tui.md` for full architecture.
 
-- **`taro dash`** — Live dashboard (active + history tables). `DashboardApp` → `DashboardScreen`.
-- **`taro history`** — Interactive history table (default), `--no-pager` for plain text output.
+- **`taro jobs`** (`j`) — All-jobs overview with last-run state, running count, whole-history stats.
+  `JobsApp` → `JobsScreen`. Enter on a job → `JobScreen` (per-job drill-down).
+- **`taro dash`** (`d`) — Live dashboard (active + history tables). `DashboardApp` → `DashboardScreen`.
+- **`taro history`** (`h`) — Interactive history table (default), `--no-pager` for plain text output.
+- **`taro output`** (`o`) — Stream job output to stdout. Supports `--verbose`, `--jsonl`, `--errors`,
+  `--path`, `--color`, `--scheme`. Default: plain formatted content to stdout.
+- **JobScreen** — Per-job dashboard with ScreenHeader (whole-history metrics), active + recent history
+  tables. Pushed from `JobsScreen`. File: `tui/job_screen.py`.
 - **Instance detail** — `InstanceScreen` with header, phase tree, phase detail, output panel.
+  Output panel supports vim-style navigation (`j/k/g/G`, `Ctrl+d/u`, `/` search, `n/N`).
 - **Selector** — `select_instance()` modal for action commands.
 - Shared table helpers in `tui/selector.py`: `add_columns`, `build_cells`, `row_key`, `LinkedTable`.
 

@@ -192,11 +192,11 @@ Shows all available environments: built-in local (if its DB exists, marked as `(
 ### Configuring
 
 ```bash
-taro env config                         # show config (auto-selects if one env)
-taro env config -e dev                  # specific env
+taro env show                           # show config (auto-selects if one env)
+taro env show -e dev                    # specific env
 
-taro env config --edit                  # edit in $EDITOR (TOML presentation)
-taro env config --edit -e dev
+taro env edit                           # edit in $EDITOR (TOML presentation)
+taro env edit -e dev
 ```
 
 The edit command dumps current config as TOML, opens `$EDITOR`, validates the result, and saves. Invalid TOML or schema
@@ -214,9 +214,21 @@ Deletes the DB file and removes the registry entry. The built-in local cannot be
 ### Cleaning stale transport state
 
 ```bash
-taro clean                              # remove dead process socket dirs
-taro clean -e dev
+taro env clean                          # remove dead process socket dirs
+taro env clean -e dev
 ```
+
+### Pruning run history
+
+```bash
+taro env prune "*" --keep-days 0              # wipe all history
+taro env prune "*" --keep-days 7              # keep last week
+taro env prune "test_*" --keep-days 0         # wipe all test runs
+taro env prune "backup" --keep-days 30 -e dev # prune old backup runs
+```
+
+Removes matching run records from the database and their output files. Both PATTERN and `--keep-days` are
+required to prevent accidental data loss. Use `-f` to skip confirmation.
 
 ## Usage in Code
 
