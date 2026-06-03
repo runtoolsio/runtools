@@ -27,3 +27,30 @@
 
 - Document `taro` pattern-matching behavior per command.
   Current behavior differs between commands such as `history`, `ps`, `wait`, and `output`.
+
+## Output Format Plan
+
+### Run snapshot (separate layer — NOT the output schema)
+
+- **Split `Fault.reason` → `type` + `message`.**
+  `from_exception` currently merges `f"{ClassName}: {exception}"` — lossy to re-split at
+  export. Store type/message separately; update serialize/deserialize and the test in
+  `runcore/src/runtools/runcore/test/job.py`. Map `category` → `runtools.fault.*`.
+  Resolve the two stack-trace homes (`Fault.stack_trace` vs `TerminationInfo.stack_trace`).
+  Note: output-stream exceptions stay free-text lines (`is_error`); runtools does not
+  synthesize structure from arbitrary tracebacks.
+
+### Deferred — export boundary (separate effort, not the on-disk schema)
+
+- **OTel/ECS export adapters** (`to_otel()` / `to_ecs()`) + OTLP sink.
+  Mapping tables in the plan are documentation-only until this exists.
+
+- **Resource mapping.** Identity (`job_id`/`run_id`/`ordinal`/`node_id`) →
+  `service.name` / `service.instance.id` + `runtools.*`, attached at Resource level
+  (set once), NOT duplicated per log line.
+
+- **Trace correlation.** Promote `trace_id`/`span_id` to first-class envelope fields and
+  map to OTel `TraceId`/`SpanId`. Pass-through preserves them in `fields` today.
+
+- **Exception export.** Native `type`/`message`/`stacktrace` → OTel `exception.*`;
+  `category` → `runtools.fault.*`.
