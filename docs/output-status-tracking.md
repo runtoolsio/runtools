@@ -134,7 +134,7 @@ and `ParsingPreprocessor` wraps the parsers into a callable that transforms `Out
 
 ```python
 from runtools.runcore.util.parser import KVParser
-from runtools.runjob.output import ParsingPreprocessor, OutputSink
+from runtools.runjob.output import ParsingPreprocessor, OutputPipeline
 
 preprocessor = ParsingPreprocessor([KVParser()])
 
@@ -161,13 +161,13 @@ If a line already has `fields` (e.g., from structured logging), `ParsingPreproce
 
 > **Package:** `runtools.runcore.util.parser` — `KVParser`, `IndexParser`
 
-## 6. OutputSink — wiring it together
+## 6. OutputPipeline — wiring it together
 
-`OutputSink` is the hub that connects parsing to observers. It accepts `OutputLine` objects,
+`OutputPipeline` is the hub that connects parsing to observers. It accepts `OutputLine` objects,
 runs them through an optional preprocessor, and forwards to all registered observers.
 
 ```python
-sink = OutputSink(ParsingPreprocessor([KVParser()]))
+sink = OutputPipeline(ParsingPreprocessor([KVParser()]))
 tracker = StatusTracker()
 sink.add_observer(tracker)
 
@@ -179,16 +179,16 @@ The flow: **OutputLine → preprocessing (parsing) → observers (StatusTracker,
 
 ## 7. In a job instance — auto-wiring
 
-`instance.create()` sets up the full pipeline for you. It creates default `OutputSink`,
+`instance.create()` sets up the full pipeline for you. It creates default `OutputPipeline`,
 `OutputRouter`, and `StatusTracker`, then auto-wires the tracker as an output observer.
 
 ```python
 from runtools.runjob import instance
-from runtools.runjob.output import OutputSink, ParsingPreprocessor
+from runtools.runjob.output import OutputPipeline, ParsingPreprocessor
 from runtools.runcore.util.parser import KVParser
 
-sink = OutputSink(ParsingPreprocessor([KVParser()]))
-inst = instance.create(instance_id, env, root_phase, output_sink=sink)
+sink = OutputPipeline(ParsingPreprocessor([KVParser()]))
+inst = instance.create(instance_id, env, root_phase, output_pipeline=sink)
 inst.run()
 
 # StatusTracker was auto-wired — status available via:
@@ -197,10 +197,10 @@ print(run.status)  # Status snapshot from the auto-created tracker
 ```
 
 What `create()` does automatically:
-1. Creates `OutputSink` if not provided (no parsing by default)
+1. Creates `OutputPipeline` if not provided (no parsing by default)
 2. Creates `OutputRouter` with an in-memory tail buffer (last 50 lines)
 3. Creates `StatusTracker`
-4. Registers the tracker as an observer on the sink: `output_sink.add_observer(status_tracker)`
+4. Registers the tracker as an observer on the sink: `output_pipeline.add_observer(status_tracker)`
 
 During `inst.run()`, log records from the root logger are also captured into the sink
 (filtered to the current instance).
@@ -208,18 +208,18 @@ During `inst.run()`, log records from the root logger are also captured into the
 ## 8. Structured logging — fields without parsing
 
 Instead of printing key-value text for `KVParser` to parse, you can use Python's logging
-with `extra` fields. The `OutputSink` log handler extracts extras automatically — no parser needed.
+with `extra` fields. The `OutputPipeline` log handler extracts extras automatically — no parser needed.
 
 ```python
 import logging
 log = logging.getLogger("my_job")
 
 log.info("progress", extra={"operation": "upload", "completed": 45, "total": 100})
-# OutputSink's log handler extracts extras → OutputLine.fields automatically
+# OutputPipeline's log handler extracts extras → OutputLine.fields automatically
 # No KVParser needed — fields are already structured
 ```
 
-This works because `OutputSink.capturing_log_handler()` creates a handler that:
+This works because `OutputPipeline.capturing_log_handler()` creates a handler that:
 1. Formats the log record into `OutputLine.message`
 2. Extracts all non-built-in attributes from the `LogRecord` into `OutputLine.fields`
 
@@ -237,7 +237,7 @@ run --kv-filter ./my-script.sh
 run --kv-filter --kv-alias "count=completed" ./my-script.sh
 ```
 
-`--kv-filter` (`-k`) creates an `OutputSink(ParsingPreprocessor([KVParser()]))`.
+`--kv-filter` (`-k`) creates an `OutputPipeline(ParsingPreprocessor([KVParser()]))`.
 `--kv-alias` maps output keys to standard field names (e.g., your script prints `count=5`
 but the tracker expects `completed`).
 
@@ -262,7 +262,7 @@ Then `run -k --kv-alias "count=completed" ./my-script.sh` will track it as:
                            │
                            ▼
          ┌──────────────────────────────────────┐
-         │            OutputSink                │
+         │            OutputPipeline                │
          │  ┌────────────────────────────────┐  │
          │  │ ParsingPreprocessor (optional) │  │
          │  │  └─ KVParser / IndexParser     │  │
@@ -283,7 +283,7 @@ Then `run -k --kv-alias "count=completed" ./my-script.sh` will track it as:
 | `runjob/track.py`       | `runtools.runjob.track`       | `StatusTracker`, `OperationTracker`, output handlers |
 | `runcore/status.py`     | `runtools.runcore.status`     | `Event`, `Operation`, `Status`                       |
 | `runcore/output.py`     | `runtools.runcore.output`     | `OutputLine`, `OutputObserver`, `OutputLineFactory`  |
-| `runjob/output.py`      | `runtools.runjob.output`      | `OutputSink`, `ParsingPreprocessor`, `OutputRouter`  |
+| `runjob/output.py`      | `runtools.runjob.output`      | `OutputPipeline`, `ParsingPreprocessor`, `OutputRouter`  |
 | `runcore/util/parser.py`| `runtools.runcore.util.parser` | `KVParser`, `IndexParser`                           |
 | `runjob/instance.py`    | `runtools.runjob.instance`    | `create()` factory with auto-wiring                  |
-| `runcli/__init__.py`    | `runtools.runcli`             | `_build_output_sink()`, CLI integration              |
+| `runcli/__init__.py`    | `runtools.runcli`             | `_build_output_pipeline()`, CLI integration              |

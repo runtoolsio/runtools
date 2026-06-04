@@ -6,7 +6,7 @@
   ^C^CERROR - Output observer error line=2026-04-23 03:48:35,470 - event=[v2_first_pass_iteration] lineNumber=[40000] dataLines=[39557]
     + Exception Group Traceback (most recent call last):
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/program.py", line 98, in _process_output
-    |     run_ctx.output_sink.new_output(line_stripped, is_err, source=self.id)
+    |     run_ctx.output_pipeline.new_output(line_stripped, is_err, source=self.id)
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/__init__.py", line 230, in new_output
     |     self._output_notification.observer_proxy.new_output(output_line)
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runcore/util/observer.py", line 120, in method
@@ -27,7 +27,7 @@
   ERROR - Output observer error line=2026-04-23 03:48:35,320 - event=[missing_category] product=[46S4ALFA3M]
     + Exception Group Traceback (most recent call last):
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/program.py", line 98, in _process_output
-    |     run_ctx.output_sink.new_output(line_stripped, is_err, source=self.id)
+    |     run_ctx.output_pipeline.new_output(line_stripped, is_err, source=self.id)
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/__init__.py", line 230, in new_output
     |     self._output_notification.observer_proxy.new_output(output_line)
     |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runcore/util/observer.py", line 120, in method
