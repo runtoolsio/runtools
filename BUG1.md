@@ -17,8 +17,8 @@
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runcore/util/observer.py", line 112, in method
       |     getattr(observer, name)(*args, **kwargs)
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/__init__.py", line 372, in new_output
-      |     storage.store_line(output_line)
-      |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 44, in store_line
+      |     storage.write_line(output_line)
+      |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 44, in write_line
       |     self._write_line(line)
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 55, in _write_line
       |     self._file.write(raw)
@@ -38,8 +38,8 @@
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runcore/util/observer.py", line 112, in method
       |     getattr(observer, name)(*args, **kwargs)
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/__init__.py", line 372, in new_output
-      |     storage.store_line(output_line)
-      |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 44, in store_line
+      |     storage.write_line(output_line)
+      |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 44, in write_line
       |     self._write_line(line)
       |   File "/home/ec2-user/.local/share/pipx/venvs/runtoolsio-runcli/lib64/python3.12/site-packages/runtools/runjob/output/file.py", line 55, in _write_line
       |     self._file.write(raw)
