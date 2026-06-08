@@ -15,8 +15,9 @@ An environment consists of:
 
 - **Database** — persistent state: configuration, run history, future permissions. The environment is centered on its
   database, which is the authoritative source of truth.
-- **Transport** — inter-component communication: RPC between nodes and connectors, event dispatching. Currently Unix
-  domain sockets; future options include Redis, gRPC, etc.
+- **Transport** — selects the runtime boundary, communication mechanism, and coordination primitives in one
+  discriminator. Two variants today: `in_process` (no boundary, same Python process) and `unix_socket` (process
+  boundary over Unix domain sockets). Future: Redis, postgres LISTEN/NOTIFY.
 - **Output backends** — output routing/storage for instance stdout/stderr and structured output. Configured from the
   database via `output.storages`.
 
@@ -24,7 +25,7 @@ The database is the source of truth. Transport and output backend configuration 
 everything else.
 
 The database is not optional. Every environment has a database, though the concrete implementation may be persistent or
-transient/in-memory depending on the environment type.
+transient/in-memory depending on the transport.
 
 ## Built-in Local
 
@@ -42,7 +43,7 @@ An `EnvironmentEntry` describes how to reach an environment's database. It carri
 driver, and an optional path:
 
 ```python
-entry = EnvironmentEntry(id="dev", driver="sqlite", path="~/data/dev.db")
+entry = EnvironmentEntry(id="dev", driver="sqlite", location="~/data/dev.db")
 ```
 
 Entries come from three sources:
@@ -98,13 +99,14 @@ JSON-encoded value.
 A fresh environment has an **empty config table** — all settings use defaults. Only non-default values are stored. All
 config models are frozen (immutable after loading).
 
-| Setting                           | Description                                                                    | Default              |
-|-----------------------------------|--------------------------------------------------------------------------------|----------------------|
-| `layout.root_dir`                 | Root directory for local transport socket directories; local environments only | system default       |
-| `output.default_tail_buffer_size` | Default in-memory tail buffer size in bytes                                    | 2 MiB                |
-| `output.storages`                 | Output storage backends (file, etc.)                                           | file storage enabled |
-| `retention.max_runs_per_job`      | Max finished runs to keep per job                                              | 500                  |
-| `retention.max_runs_per_env`      | Max finished runs to keep per environment                                      | 10000                |
+| Setting                           | Description                                                                         | Default              |
+|-----------------------------------|-------------------------------------------------------------------------------------|----------------------|
+| `transport.type`                  | Transport variant: `unix_socket` or `in_process`                                    | `unix_socket`        |
+| `transport.root_dir`              | Transport root for `unix_socket`: holds component dirs, socket files, liveness locks | system default       |
+| `output.default_tail_buffer_size` | Default in-memory tail buffer size in bytes                                         | 2 MiB                |
+| `output.storages`                 | Output storage backends (file, etc.)                                                | file storage enabled |
+| `retention.max_runs_per_job`      | Max finished runs to keep per job                                                   | 500                  |
+| `retention.max_runs_per_env`      | Max finished runs to keep per environment                                           | 10000                |
 
 ### Save semantics
 
@@ -146,19 +148,31 @@ Resolves across the full set of available environments:
 There is no "default environment" setting. The rule is deterministic: runjob/runcli default to `local`, taro resolves
 from available environments.
 
-## Environment Types
+## Transport
 
-### Local
+The `transport` config field selects topology, communication mechanism, and coordination primitives in one
+discriminator. The variants below are the runtime modes runtools ships today.
 
-A local environment runs on a single machine. Transport uses Unix domain sockets. Database is a SQLite file. This is the
-standard type.
+### `unix_socket`
 
-### In-Process (testing)
+Process boundary over Unix domain sockets. The standard mode for durable environments on a single machine: socket
+files, component dirs, and liveness `flock`s live under a per-environment directory. Pairs with SQLite persistence
+by default. This is what `EnvironmentConfig.default_local()` produces and what `taro env create` writes.
 
-An in-process environment exists only within a single process. It uses in-memory SQLite and memory-based locks with no
-transport layer. Used for testing.
+```toml
+[transport]
+type = "unix_socket"
+# root_dir = "/tmp/runtools_alice/env/dev"   # optional; system default when omitted
+```
 
-It still has a database, but that database is transient/in-memory rather than file-backed.
+### `in_process`
+
+No transport boundary — node and clients live in the same Python process, no connector boundary, in-memory locks.
+Used for tests and embedded scenarios.
+
+In-process environments are not registered and not loaded from a DB. They are constructed via the dedicated factory,
+which builds an `EnvironmentConfig` with `transport=InProcessTransportConfig()` and an in-memory SQLite database; nothing
+is persisted.
 
 ```python
 from runtools.runjob.node import in_process
@@ -269,7 +283,7 @@ with node.connect("dev") as env:
     inst.run()
 
 # With runtime overrides (not stored in config)
-with node.connect(no_output_storage=True, tail_buffer_size=4096) as env:
+with node.connect(disable_output=("all",), tail_buffer_size=4096) as env:
     inst = env.create_instance("my_job", root_phase=my_phase)
     inst.run()
 ```
@@ -278,16 +292,22 @@ with node.connect(no_output_storage=True, tail_buffer_size=4096) as env:
 
 ```python
 from runtools.runcore.env import (
-    lookup, load_env_config, save_env_config,
-    create_local_environment, delete_local_environment,
-    available_environments, EnvironmentEntry,
+    EnvironmentConfig, UnixSocketTransportConfig, RetentionConfig,
+    EnvironmentEntry, lookup, load_env_config, save_env_config,
+    create_environment, delete_environment, available_environments,
 )
 
-# Create
-create_local_environment("dev")
-create_local_environment("staging", db_path="/data/staging.db")
+# Create — supply an EnvironmentConfig (default_local is the standard preset)
+entry = EnvironmentEntry(id="dev", driver="sqlite")
+create_environment(entry, EnvironmentConfig.default_local("dev"))
 
-# Read/modify config (use model_copy — config is frozen)
+# With a custom database location and socket root
+entry = EnvironmentEntry(id="staging", driver="sqlite", location="/data/staging.db")
+cfg = EnvironmentConfig(id="staging",
+                        transport=UnixSocketTransportConfig(root_dir="/tmp/staging-sockets"))
+create_environment(entry, cfg)
+
+# Read/modify config — config is frozen, use model_copy(update={...})
 entry = lookup("dev")
 cfg = load_env_config(entry)
 cfg_modified = cfg.model_copy(update={"retention": RetentionConfig(max_runs_per_job=100)})
@@ -295,13 +315,13 @@ save_env_config(entry, cfg_modified)
 
 # List available
 for entry in available_environments():
-    print(f"{entry.id}: {entry.driver} @ {entry.db_path()}")
+    print(f"{entry.id}: {entry.driver} @ {entry.location or '(default)'}")
 
 # Programmatic entry (no registry needed)
-custom = EnvironmentEntry(id="custom", driver="sqlite", path="/tmp/custom.db")
+custom = EnvironmentEntry(id="custom", driver="sqlite", location="/tmp/custom.db")
 
 # Delete
-delete_local_environment("dev")
+delete_environment("dev")
 ```
 
 ## Implementation Notes
