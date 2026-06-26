@@ -65,6 +65,20 @@ taro/venv/bin/python -m pytest taro/test/ -v
 - Avoid broad `Exception`; allow it only at process/observer boundaries with explicit handling
 - Test behaviour not implementation — pytest with BDD-ish style
 
+## Response Style
+
+Technical/design answers must be clear, well-structured, and professional — optimize for scannability, not prose volume. This is development work, not essay writing: keep the rigor, structure it for the reader.
+
+- **Lead with the verdict** One-line answer/recommendation first; cut preamble and restated context.
+- **Show concrete artifacts** Prefer a small code/SQL/JSON snippet, signature, or example payload over describing it in words — show, don't tell.
+- **Labeled bullet lists for analysis** (e.g. `Problems:`, `Options:`), each item one crisp clause — not dense multi-sentence paragraphs.
+- **Present alternatives as artifacts** Show the better option (the minimal payload, the corrected signature), not a paragraph about it.
+- **Close with a clear recommendation or principle** — one short line: what to do and why.
+- **Separate contract from rationale** State the required behavior first
+    (must, must not); put “why” in a short Rationale: bullet only when
+    it prevents misuse.
+- **Plain, professional language** - no vibe cool phrasing, no filler, only clear answers.
+
 ## Versioning & Deployment
 
 - Bump patch version in each changed package before deploying.
