@@ -1,7 +1,7 @@
 # Environment
 
-An environment isolates job instances from each other. Each environment has its own database, transport, and output
-backends.
+An environment isolates job instances from each other. Each environment has its own database, live-instance
+directory, and output backends.
 
 In practical terms, an environment is a named place where jobs coordinate, connectors observe/control them, and run
 history is stored. Most users only need two ideas:
@@ -11,21 +11,27 @@ history is stored. Most users only need two ideas:
 
 ## Structure
 
-An environment consists of:
+An environment is selected by its **kind** — a curated backend bundle naming a supported combination of storage,
+live transport, and coordination (not independent knobs):
+
+- **`local`** — SQLite storage + unix-socket instance directory + file locks. The zero-config default.
+- **`postgres`** — PostgreSQL storage + DB-polling instance directory. Observe-only for now: connectors work,
+  running a node raises until the producer slice lands.
+
+Each kind composes:
 
 - **Database** — persistent state: configuration, run history, future permissions. The environment is centered on its
   database, which is the authoritative source of truth.
-- **Transport** — selects the runtime boundary, communication mechanism, and coordination primitives in one
-  discriminator. Two variants today: `in_process` (no boundary, same Python process) and `unix_socket` (process
-  boundary over Unix domain sockets). Future: Redis, postgres LISTEN/NOTIFY.
+- **Instance directory** — the consumer's view of live instances (how connectors find, observe, and control them).
+  Chosen by the kind: unix sockets for `local`, DB polling for `postgres`.
 - **Output backends** — output routing/storage for instance stdout/stderr and structured output. Configured from the
-  database via `output.storages`.
+  database via `output.storages`, independent of the kind.
 
-The database is the source of truth. Transport and output backend configuration are stored in the database alongside
-everything else.
+The database is the source of truth. Output backend and kind-specific configuration are stored in the database
+alongside everything else.
 
 The database is not optional. Every environment has a database, though the concrete implementation may be persistent or
-transient/in-memory depending on the transport.
+transient/in-memory (in-process environments).
 
 ## Built-in Local
 
@@ -39,11 +45,11 @@ redefined.
 
 ## Environment Entry
 
-An `EnvironmentEntry` describes how to reach an environment's database. It carries the environment ID, the database
-driver, and an optional path:
+An `EnvironmentEntry` describes how to reach an environment's database. It carries the environment ID, the kind,
+and an optional location:
 
 ```python
-entry = EnvironmentEntry(id="dev", driver="sqlite", location="~/data/dev.db")
+entry = EnvironmentEntry(id="dev", kind=EnvironmentKind.LOCAL, location="~/data/dev.db")
 ```
 
 Entries come from three sources:
@@ -66,20 +72,21 @@ Single file — no directory scanning, no layered merging.
 
 ```toml
 [environments.dev]
-driver = "sqlite"
+kind = "local"
 
 [environments.staging]
-driver = "sqlite"
-path = "~/data/staging.db"
+kind = "local"
+location = "~/data/staging.db"
+
+[environments.prod]
+kind = "postgres"
+location = "postgresql://runtools@db.internal/runtools"
 ```
 
-| Field    | Type | Default    | Description                                                                                                      |
-|----------|------|------------|------------------------------------------------------------------------------------------------------------------|
-| `driver` | str  | `"sqlite"` | Database driver. Only `"sqlite"` is currently supported. Future: `"postgres"`.                                   |
-| `path`   | str? | none       | Path to the SQLite DB file. Supports `~` expansion. When omitted, defaults to `~/.local/share/runtools/<id>.db`. |
-
-The `driver` field describes the storage backend mechanism (how to connect to the database), not the environment's
-conceptual type.
+| Field      | Type | Default   | Description                                                                                                             |
+|------------|------|-----------|--------------------------------------------------------------------------------------------------------------------------|
+| `kind`     | str  | `"local"` | Environment kind: `"local"` or `"postgres"`.                                                                             |
+| `location` | str? | none      | Kind-specific location: SQLite DB path (`~` expansion, defaults to `~/.local/share/runtools/<id>.db`) or postgres DSN. |
 
 The name `local` is reserved and cannot appear in the registry. If it does, registry loading fails with an error.
 
@@ -87,26 +94,24 @@ The name `local` is reserved and cannot appear in the registry. If it does, regi
 
 The environment database holds everything:
 
-- **Config table** — authoritative runtime configuration (retention, output, transport settings)
+- **Config table** — authoritative runtime configuration (retention, output, kind-specific settings)
 - **Runs table** — job run history
 - Future: permissions, audit log
 
 ### Configuration
 
-Runtime configuration is stored in a `config` table (schema version 5). Each setting is a separate key with a
-JSON-encoded value.
+Runtime configuration is stored in a `config` table. Each setting is a separate key with a JSON-encoded value.
 
-A fresh environment has an **empty config table** — all settings use defaults. Only non-default values are stored. All
-config models are frozen (immutable after loading).
+The config model is per-kind (`LocalEnvironmentConfig` / `PostgresEnvironmentConfig`), chosen by the entry's `kind`
+at load — the config itself stores neither `id` nor `kind`. All config models are frozen (immutable after loading).
 
-| Setting                           | Description                                                                         | Default              |
-|-----------------------------------|-------------------------------------------------------------------------------------|----------------------|
-| `transport.type`                  | Transport variant: `unix_socket` or `in_process`                                    | `unix_socket`        |
-| `transport.root_dir`              | Transport root for `unix_socket`: holds component dirs, socket files, liveness locks | system default       |
-| `output.default_tail_buffer_size` | Default in-memory tail buffer size in bytes                                         | 2 MiB                |
-| `output.storages`                 | Output storage backends (file, etc.)                                                | file storage enabled |
-| `retention.max_runs_per_job`      | Max finished runs to keep per job                                                   | 500                  |
-| `retention.max_runs_per_env`      | Max finished runs to keep per environment                                           | 10000                |
+| Setting                           | Kind  | Description                                                                        | Default              |
+|-----------------------------------|-------|-------------------------------------------------------------------------------------|----------------------|
+| `root_dir`                        | local | Transport root: holds component dirs, socket files, liveness locks                | system default       |
+| `output.default_tail_buffer_size` | all   | Default in-memory tail buffer size in bytes                                        | 2 MiB                |
+| `output.storages`                 | all   | Output storage backends (file, etc.)                                               | file storage enabled |
+| `retention.keep_days`             | all   | Default retention for `env prune`: keep finished runs newer than N days            | none                 |
+| `plugins`                         | all   | Plugin name → config mapping                                                       | empty                |
 
 ### Save semantics
 
@@ -148,31 +153,31 @@ Resolves across the full set of available environments:
 There is no "default environment" setting. The rule is deterministic: runjob/runcli default to `local`, taro resolves
 from available environments.
 
-## Transport
+## Kinds
 
-The `transport` config field selects topology, communication mechanism, and coordination primitives in one
-discriminator. The variants below are the runtime modes runtools ships today.
+The entry's `kind` selects the backend bundle — storage, live transport, and coordination together. Supported
+combinations only; there are no independent storage/transport knobs.
 
-### `unix_socket`
+### `local`
 
-Process boundary over Unix domain sockets. The standard mode for durable environments on a single machine: socket
-files, component dirs, and liveness `flock`s live under a per-environment directory. Pairs with SQLite persistence
-by default. This is what `EnvironmentConfig.default_local()` produces and what `taro env create` writes.
+SQLite storage + process boundary over Unix domain sockets + file locks. The standard kind for durable environments
+on a single machine: socket files, component dirs, and liveness `flock`s live under a per-environment directory
+(overridable via the `root_dir` config setting). This is what the built-in `local` environment uses and what
+`taro env create` writes.
 
-```toml
-[transport]
-type = "unix_socket"
-# root_dir = "/tmp/runtools_alice/env/dev"   # optional; system default when omitted
-```
+### `postgres`
 
-### `in_process`
+PostgreSQL storage + DB-polling instance directory. Connectors observe active runs by polling the environment
+database rather than contacting producing nodes. **Observe-only for now** — `node.connect` raises
+`NotImplementedError` until the producer slice (node access point + advisory locks) lands.
+
+### In-process (not a kind)
 
 No transport boundary — node and clients live in the same Python process, no connector boundary, in-memory locks.
 Used for tests and embedded scenarios.
 
-In-process environments are not registered and not loaded from a DB. They are constructed via the dedicated factory,
-which builds an `EnvironmentConfig` with `transport=InProcessTransportConfig()` and an in-memory SQLite database; nothing
-is persisted.
+In-process environments are not registered, not loaded from a DB, and not selectable by kind. They are constructed
+via the dedicated factory with an in-memory SQLite database; nothing is persisted.
 
 ```python
 from runtools.runjob.node import in_process
@@ -292,33 +297,31 @@ with node.connect(disable_output=("all",), tail_buffer_size=4096) as env:
 
 ```python
 from runtools.runcore.env import (
-    EnvironmentConfig, UnixSocketTransportConfig, RetentionConfig,
+    EnvironmentKind, LocalEnvironmentConfig, RetentionConfig,
     EnvironmentEntry, lookup, load_env_config, save_env_config,
     create_environment, delete_environment, available_environments,
 )
 
-# Create — supply an EnvironmentConfig (default_local is the standard preset)
-entry = EnvironmentEntry(id="dev", driver="sqlite")
-create_environment(entry, EnvironmentConfig.default_local("dev"))
+# Create — supply the kind's config (defaults are the standard preset)
+entry = EnvironmentEntry(id="dev", kind=EnvironmentKind.LOCAL)
+create_environment(entry, LocalEnvironmentConfig())
 
 # With a custom database location and socket root
-entry = EnvironmentEntry(id="staging", driver="sqlite", location="/data/staging.db")
-cfg = EnvironmentConfig(id="staging",
-                        transport=UnixSocketTransportConfig(root_dir="/tmp/staging-sockets"))
-create_environment(entry, cfg)
+entry = EnvironmentEntry(id="staging", kind=EnvironmentKind.LOCAL, location="/data/staging.db")
+create_environment(entry, LocalEnvironmentConfig(root_dir="/tmp/staging-sockets"))
 
 # Read/modify config — config is frozen, use model_copy(update={...})
 entry = lookup("dev")
 cfg = load_env_config(entry)
-cfg_modified = cfg.model_copy(update={"retention": RetentionConfig(max_runs_per_job=100)})
+cfg_modified = cfg.model_copy(update={"retention": RetentionConfig(keep_days=30)})
 save_env_config(entry, cfg_modified)
 
 # List available
 for entry in available_environments():
-    print(f"{entry.id}: {entry.driver} @ {entry.location or '(default)'}")
+    print(f"{entry.id}: {entry.kind} @ {entry.location or '(default)'}")
 
 # Programmatic entry (no registry needed)
-custom = EnvironmentEntry(id="custom", driver="sqlite", location="/tmp/custom.db")
+custom = EnvironmentEntry(id="custom", kind=EnvironmentKind.LOCAL, location="/tmp/custom.db")
 
 # Delete
 delete_environment("dev")

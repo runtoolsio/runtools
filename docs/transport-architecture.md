@@ -15,25 +15,24 @@ grab-bag seam.
 **Implemented:** the directory sweep — `InstanceDirectory`/`InstanceDiscovery`
 seams, `InstanceDirectoryBase` (identity map, buffered replay, ended
 tombstones), the unix-socket directory/discovery/proxy, the slim `_Connector`,
-and the access-point renames. **The persistence write+read path (design point 4)
-ships dark:** `RunStatePersister` (coalesced flush), `read_active_runs` +
+and the access-point renames. **The persistence write+read path (design point 4):**
+`RunStatePersister` (coalesced flush), `read_active_runs` +
 `DbInstanceDiscovery`, the `updated_at` + `state_updated_at` columns with the
 newer-wins guard, `active_run_versions()`, and the poll directory itself
 (`PollingInstanceDirectory` + `SnapshotJobInstanceProxy` + snapshot-diff
 synthesis) — all across both storage backends (PostgreSQL alongside SQLite,
-sharing `runcore/db/sql.py`). What is *not* wired yet is selecting the poll lane
-as a user-facing environment kind. **Agreed next
-architecture step:** user-facing environments should be selected as curated
-backend bundles, not arbitrary storage/transport/lock combinations. Internally,
-storage, directory/live transport, locks, and output remain separate units with
-narrow interfaces; a backend kind wires a supported combination. For the
-PostgreSQL backend, live state sync starts as poll-based sync — a cheap
-`active_run_versions()` scan + deep-read-changed + evict-absent, with
-snapshot-diff event synthesis (see point 4). `NOTIFY` doorbells/triggers are the
-deferred escalation path.
-**Open:** backend-bundle factory/config shape; PostgreSQL backend live-state
-integration; heartbeat/liveness (point 4, deferred); split the `JobInstance`
-contract (deferred until it bites); signals-as-state (point 5).
+sharing `runcore/db/sql.py`). **The backend-kind slice:** environments are
+selected as curated backend kinds (`EnvironmentKind.LOCAL` / `POSTGRES` on the
+entry, per-kind config classes, one `match entry.kind` per entry point — see
+the implementation plan below; the earlier backend-registry sketch was
+superseded by this simpler shape). The poll lane is live as the `postgres`
+kind's connector directory. Internally, storage, directory/live transport,
+locks, and output remain separate units with narrow interfaces; a kind wires a
+supported combination. `NOTIFY` doorbells/triggers stay the deferred
+escalation path.
+**Open:** the `postgres` producer slice (node access point + advisory locks —
+the node raises until then); heartbeat/liveness (point 4, deferred); split the
+`JobInstance` contract (deferred until it bites); signals-as-state (point 5).
 
 ## Mental model
 
@@ -81,7 +80,7 @@ output backend       file | s3 | ...                 -> OutputBackend
 A backend kind is a recipe that wires a supported set of units:
 
 ```text
-local       -> sqlite   + unix_socket/in_process directory + local locks
+local       -> sqlite   + unix_socket directory            + local locks
 postgres    -> postgres + postgres-backed directory         + advisory locks
 distributed -> postgres + redis directory                   + redis/advisory locks
 ```
@@ -96,7 +95,10 @@ Consequences:
 
 - `EnvironmentEntry.driver` becomes `EnvironmentEntry.kind`.
 - `EnvironmentConfig.transport` goes away; transport/directory selection is an
-  internal part of the backend recipe.
+  internal part of the backend recipe. `EnvironmentConfig` becomes per-kind
+  (`LocalEnvironmentConfig` / `PostgresEnvironmentConfig`), chosen by `entry.kind`
+  at load (no stored `config.kind`); kind-specific settings such as `root_dir`
+  live there, not on the entry.
 - Backend implementations may compose multiple substrates internally, but the
   public config names supported bundles.
 - The current DB-polling directory is an internal state-observation unit. It is
@@ -109,49 +111,146 @@ Consequences:
   registry kind. Registry kinds start as `local`, `postgres`, and later
   `distributed`.
 
-Implementation plan:
+Implementation plan (kind slice — **no backend registry**):
+
+An earlier draft introduced a `Backend` dataclass + `StorageDriver` Protocol + `backend.py`
+registry as the single dispatch point. Dropped before implementation: at two kinds, where the
+postgres kind derives its directory (and later its locks) from the already-open DB, a recipe
+object is more machinery than the variation it encodes. The chosen shape is maximally explicit —
+each entry point branches **once** on `entry.kind` into a per-kind function that reads
+top-to-bottom. Shared helpers are extracted *later* from real duplication, after the slice is
+green everywhere, not designed up front.
+
+**Kind** — closed discriminator (`runcore/env.py`):
 
 ```python
 class EnvironmentKind(StrEnum):
-    LOCAL = "local"
-    POSTGRES = "postgres"
-    DISTRIBUTED = "distributed"  # later
-
-
-class EnvironmentEntry(BaseModel):
-    id: str
-    kind: EnvironmentKind
-    location: str | None = None
+    LOCAL = "local"        # sqlite + unix-socket directory + file locks
+    POSTGRES = "postgres"  # postgres + polling directory (observe-only until the producer slice)
+    # DISTRIBUTED = "distributed"  # later: postgres + redis directory/locks
 ```
 
-Connector and node creation dispatch on `entry.kind`, before opening storage or
-loading `EnvironmentConfig`:
+**Entry = pure locator** — only what is needed to *reach and open* the config store; flat, no
+per-kind fields (kind-specific settings live in the config, readable only once the store is open):
 
 ```python
+class EnvironmentEntry(BaseModel):
+    id: str
+    kind: EnvironmentKind = EnvironmentKind.LOCAL
+    location: str | None = None        # sqlite path | postgres DSN
+```
+
+The registry key is `kind` — this also fixes the old round-trip mismatch where
+`create_environment` wrote `driver` while `EnvironmentEntry` declared `kind`.
+
+**Config = per-kind configuration, discriminated externally by `entry.kind`.** No `kind` and no
+`id` field in the config — identity and discrimination live on the entry; the config is pure
+behaviour. Kind-specific settings (`root_dir`, later `redis`) live here because they are used
+only *after* the store is open — configuration, not locator:
+
+```python
+class _EnvironmentConfigBase(BaseModel):
+    output: OutputConfig = Field(default_factory=OutputConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
+    plugins: dict[str, dict] = Field(default_factory=dict)
+
+class LocalEnvironmentConfig(_EnvironmentConfigBase):
+    root_dir: Path | None = None       # unix socket/lock root — local only
+
+class PostgresEnvironmentConfig(_EnvironmentConfigBase):
+    pass                               # + future postgres behaviour config
+
+EnvironmentConfig = LocalEnvironmentConfig | PostgresEnvironmentConfig       # annotation alias (no Discriminator)
+```
+
+**Data tables, not dispatch objects (`runcore/env.py`).** Environment management
+(create/delete/exists/ensure) needs the storage driver without building components; config
+editing (`load_env_config`/`save_env_config`) needs the config class. Both are two-entry
+mappings keyed by kind — data consulted by different operations, not a second dispatch inside
+the connect flow:
+
+```python
+def _db_module(kind: EnvironmentKind):     # lazy imports keep psycopg optional
+    match kind:
+        case EnvironmentKind.LOCAL:
+            from runtools.runcore.db import sqlite
+            return sqlite
+        case EnvironmentKind.POSTGRES:
+            from runtools.runcore.db import postgres
+            return postgres
+
+_CONFIG_TYPES = {EnvironmentKind.LOCAL: LocalEnvironmentConfig,
+                 EnvironmentKind.POSTGRES: PostgresEnvironmentConfig}
+```
+
+**Flow — one branch per entry point; each kind's function is linear:**
+
+```python
+# runcore/connector.py — consumer side
 def connect(env_ref=None):
     entry = resolve_env_ref(env_ref)
     ensure_environment(entry)
-    return backend(entry.kind).create_connector(entry)
+    match entry.kind:
+        case EnvironmentKind.LOCAL:    return _connect_local(entry)
+        case EnvironmentKind.POSTGRES: return _connect_postgres(entry)
+
+def _connect_local(entry):
+    from runtools.runcore.db import sqlite
+    from runtools.runcore.transport import unix_socket
+    # exists-guard: opening a missing sqlite file would silently provision a fresh schema
+    if not sqlite.exists(entry):
+        raise EnvironmentNotFoundError(f"Database for environment '{entry.id}' not found", {entry.id})
+    env_db = sqlite.create(entry)
+    env_db.open()
+    try:
+        config = LocalEnvironmentConfig.model_validate(env_db.load_config(entry.id))
+        backends = output.create_backends(entry.id, config.output.storages)    # cheap first
+        directory = unix_socket.create_instance_directory(entry.id, config.root_dir)
+        return compose(entry.id, env_db, directory, backends)
+    except BaseException:
+        env_db.close()
+        raise
+
+# _connect_postgres: same shape with postgres.create(entry) and NO exists pre-check — postgres
+# open() is validate-only (never DDL) and raises the more precise
+# EnvironmentStoreNotProvisionedError; directory = PollingInstanceDirectory(env_db).
+# runjob/node.py connect: same match; LOCAL builds stores/features/access point inline;
+# POSTGRES raises NotImplementedError ("observed but not produced") until the producer slice.
 ```
 
-The backend factory owns the full recipe:
+Each branch names its driver directly — no entry→db helper on the connect path (an earlier
+version routed through kind-dispatched `_create_env_db`, re-running inside the branch the
+dispatch the branch had just decided; the shared exists-guard also masked postgres's more
+precise not-provisioned error). `_create_env_db` stays env-private for the generic config
+functions (`load_env_config`/`save_env_config`), which do need runtime dispatch.
 
-```python
-local:
-    storage   = sqlite
-    directory = unix_socket
-    locks     = local
+The open+load boilerplate is deliberately duplicated across the per-kind functions (four sites,
+~6 lines each). Known follow-up, applied only once all repos are green: extract
+`_open_configured_environment(entry, config_type)`. Kept out of the slice so the first landing
+introduces zero new abstractions.
 
-postgres:
-    storage   = postgres
-    directory = postgres live-state lane  # initially polling
-    locks     = advisory                  # producer slice
-```
+**Deleted:** `load_database_module` (env.py's `_db_module` table replaces it), `TransportType`,
+the transport-config classes, the `TransportConfig` union, `EnvironmentConfig.transport`,
+`EnvironmentConfig.id` (callers hold the entry), `default_local()` (the default local config is
+just `LocalEnvironmentConfig()`), and the db backends' `load_config` id injection. The built-in
+local entry is `EnvironmentEntry(id="local", kind=LOCAL)`.
 
-`load_database_module()` is removed; storage modules remain internal
-implementation units used by backend factories, not user-selectable plugins.
-To avoid import cycles while this is still in flux, the backend registry may use
-lazy imports or live in `env.py` initially.
+**Settled decisions:**
+- `in_process` stays a direct constructor (`node.in_process(...)`), *not* a registry kind; its
+  `node._create` branch is removed (registry kinds are LOCAL/POSTGRES).
+- `postgres` kind is observe-only until the producer slice (node access point + advisory locks)
+  lands — the node raises for it.
+- `kind` lives once, on the entry; the config carries neither `kind` nor `id` (external
+  discrimination) — no `entry == config` invariant.
+- `root_dir` (and later `redis`) are configuration (used post-open), not locator — on the per-kind
+  config, not the entry.
+- Unix directory/access-point factories drop the `transport_config` param, taking `root_dir`
+  directly: `create_instance_directory(env_id, root_dir=None)`.
+- Cheap-first construction is preserved *inside each per-kind function* (output backends before
+  the directory, which allocates a component dir + flock).
+- Three-repo change: runcore, runjob, and taro move together (taro's `cmd/env.py` constructs
+  entries/configs and reads `transport` directly), plus a one-line runcli touch (`run_env`
+  header used `config.id`); edit + test all, then commit per repo.
 
 ## The seams
 
@@ -324,7 +423,7 @@ Open: shape of the opt-in escape hatch for confirmed-current reads
 (`refresh()` / `snap(fresh=True)` — never the default path); how discovery
 partial failure surfaces (today: log and return the reachable subset).
 
-### 4. Persistence: events are the live path, the DB is discovery/recovery
+### 4. Persistence and DB-backed live state
 
 **Agreed direction (phased, see below).** The node's memory is authoritative;
 it flows out on three channels:
@@ -654,23 +753,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **Backend-bundle config/factory.** Replace the current direction of exposing
-   independent DB-polling transport config with curated backend kinds:
-   `EnvironmentEntry.driver -> kind`, remove `transport` from
-   `EnvironmentConfig`, add a closed backend registry (`kind -> storage +
-   directory + locks later`), make connector/node creation dispatch on
-   `entry.kind`, and delete `load_database_module`. Keep `in_process` as a
-   direct constructor, not a registry kind. The PostgreSQL kind may remain
-   connector/read-only until the producer slice lands.
-2. **Wire the PostgreSQL poll lane behind the backend kind.** The poll machinery
-   is already built and green — `PollingInstanceDirectory` (version scan +
-   deep-read-changed + evict-absent), `SnapshotJobInstanceProxy`, snapshot-diff
-   synthesis, `active_run_versions()`. What remains is composing it as the
-   `postgres` kind's directory (via #1); intervals already set (active 250ms,
-   idle 2s, flush 250ms — see point 4). The poll *is* the reconciler — one path,
-   no separate sweep. `NOTIFY` doorbell / triggers deferred to the escalation
-   path. (The `postgres` kind stays connector/read-only until the producer slice
-   — node access point + advisory locks — lands.)
+1. **The `postgres` producer slice.** Node access point + advisory locks;
+   `node.connect` raises `NotImplementedError` for the `postgres` kind until it
+   lands. Intervals already set (active 250ms, idle 2s, flush 250ms — see
+   point 4).
+2. **Shared open helper (mechanical refactor).** The per-kind connect functions
+   duplicate the open-db/load-config boilerplate (four sites); extract
+   `_open_configured_environment(entry, config_type)` as its own small commit.
 3. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
    per flush tick for non-ended runs; readers interpret-never-mutate (stale
    heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible.
@@ -678,11 +767,14 @@ Rejected along the way (keep this list — the candidates keep coming back):
 5. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
-Done since the last revision: persistence write+read path (point 4) — shipped
-dark across SQLite + PostgreSQL, now including the `state_updated_at` newer-wins
-guard, `active_run_versions()`, and the poll directory itself
-(`PollingInstanceDirectory` + `SnapshotJobInstanceProxy` + snapshot-diff
-synthesis). Only the backend-kind wiring (#1) remains to make it user-selectable.
+Done since the last revision: the backend-kind slice — `EnvironmentKind` enum,
+`EnvironmentEntry.kind` (typed, registry key `kind`, fixing the old `driver`
+write/read mismatch), per-kind config classes replacing the `transport`
+discriminator (config carries neither `id` nor `kind`), one `match entry.kind`
+per entry point (connector + node), `load_database_module` replaced by env.py's
+`_db_module` table, unix factories taking `root_dir` directly. The poll lane is
+now user-selectable as the `postgres` kind (connector-side); `in_process`
+remains a direct constructor. Landed across runcore, runjob, taro, and runcli.
 
 ## Cross-references
 

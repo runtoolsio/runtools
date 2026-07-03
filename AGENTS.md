@@ -90,6 +90,14 @@ Technical/design answers must be clear, well-structured, and professional — op
 
 Pre-beta — backward compatibility is not required.
 
+Review rule:
+
+- When reviewing changes, do not raise findings only about preserving compatibility with old registry/config
+  files, old public symbols, old schemas, or gradual upgrade paths unless the task explicitly says migration,
+  upgrade compatibility, or phased rollout is in scope.
+- Treat compatibility shims as extra complexity by default. Prefer judging whether the new model is internally
+  correct, cleanly wired, well tested, and consistent across the current workspace.
+
 ## Key Abstractions
 
 - **Job** — definition (name, parameters, phases). **JobInstance** — a live, running job. **JobRun** — immutable
