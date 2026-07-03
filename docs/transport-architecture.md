@@ -73,7 +73,7 @@ Internal units stay separate and reusable:
 ```text
 storage driver       sqlite | postgres              -> ConfigStorage + RunStorage
 directory/transport  unix_socket | polling | redis   -> InstanceDirectory
-lock provider        threading | file | advisory     -> LockFactory / LockProvider
+lock provider        memory | file | advisory        -> LockProvider
 output backend       file | s3 | ...                 -> OutputBackend
 ```
 
@@ -298,18 +298,29 @@ may reuse or ignore them. One-way rule: transports import core modules
 
 ### `InstanceAccessPoint` (producer side)
 
-Unchanged in shape by the redesign.
+Pure exposure seam — coordination locks were extracted to `LockProvider` (below), so the
+access point carries only wire concerns:
 
 ```python
 # runtools/runjob/transport/__init__.py
 class InstanceAccessPoint(Protocol):
+    def start(self) -> None: ...
     def register_instance(self, job_instance: JobInstance) -> None: ...
     def unregister_instance(self, job_instance: JobInstance) -> None: ...
-    def emit(self, event) -> None: ...
-    lock_factory: Callable[[str], object]
-    def start(self) -> None: ...
     def close(self) -> None: ...
 ```
+
+### `LockProvider` (node component)
+
+Named exclusive locks for job coordination, a node component independent of the access
+point (`runcore/util/lock.py`). One method — `lock(lock_id) -> Lock` — with three
+guarantees: env-scoped ids (provider constructed per env; same id + same env = same lock
+across all nodes, different envs never contend), arbitrary string ids (encoding to the
+medium is the implementation's job), and crash release (holder death frees the lock —
+flock via the kernel, advisory via session end). Implementations: `MemoryLockProvider`
+(in_process), `FileLockProvider` (local kind, env-scoped lock dir), postgres advisory
+(producer slice, planned — session-level `pg_advisory_lock`, one dedicated connection
+per held lock, env-namespaced 64-bit key from a stable hash, server-side `lock_timeout`).
 
 ## Design points
 
