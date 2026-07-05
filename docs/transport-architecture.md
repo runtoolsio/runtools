@@ -30,9 +30,11 @@ kind's connector directory. Internally, storage, directory/live transport,
 locks, and output remain separate units with narrow interfaces; a kind wires a
 supported combination. `NOTIFY` doorbells/triggers stay the deferred
 escalation path.
-**Open:** the `postgres` producer slice (node access point + advisory locks —
-the node raises until then); heartbeat/liveness (point 4, deferred); split the
-`JobInstance` contract (deferred until it bites); signals-as-state (point 5).
+**Agreed, not yet implemented:** coordination redesign — claim-then-act (point
+6); it is a prerequisite for coordination on the `postgres` kind.
+**Open:** the `postgres` producer slice (the node raises until then);
+heartbeat/liveness (point 4, deferred); split the `JobInstance` contract
+(deferred until it bites); signals-as-state (point 5).
 
 ## Mental model
 
@@ -318,9 +320,14 @@ guarantees: env-scoped ids (provider constructed per env; same id + same env = s
 across all nodes, different envs never contend), arbitrary string ids (encoding to the
 medium is the implementation's job), and crash release (holder death frees the lock —
 flock via the kernel, advisory via session end). Implementations: `MemoryLockProvider`
-(in_process), `FileLockProvider` (local kind, env-scoped lock dir), postgres advisory
-(producer slice, planned — session-level `pg_advisory_lock`, one dedicated connection
-per held lock, env-namespaced 64-bit key from a stable hash, server-side `lock_timeout`).
+(in_process), `FileLockProvider` (local kind, env-scoped lock dir), and
+`AdvisoryLockProvider` (`runcore/db/postgres.py` — session-level `pg_advisory_lock`,
+one dedicated connection per held lock so the session is the lock token and release =
+close, env-namespaced 64-bit key from a stable hash, server-side `lock_timeout` →
+`LockAcquireTimeoutError`). What remains of the producer slice: composing
+`node._connect_postgres` (via `postgres.create_lock_provider(entry)`). Design point 6
+moves both in-house lock clients to **no-wait claims held for the protected
+operation's duration**; the `Lock` contract grows a no-wait acquire accordingly.
 
 ## Design points
 
@@ -700,9 +707,13 @@ Rules:
 - **State is truth, event is doorbell.** Write the signal, nudge over the
   transport; the phase checks on nudge, coarse poll (~seconds) as fallback.
   Zero steady-state polling.
-- **Remote phase ops return `None` and are idempotent.** Both existing ops
-  (`approve`, `resume`) already comply — they set an event and return
-  nothing; re-delivery is harmless. Outcome is observed via phase events.
+- **Remote phase ops return `None` and are idempotent.** All remaining ops
+  (`approve`, `resume`, and eventually `stop`) comply — they set an event and
+  return nothing; re-delivery is harmless. Outcome is observed via phase
+  events. (`signal_dispatch` — the one op with a return value, which would
+  have forced request/response emulation over signals — is eliminated by the
+  claim-then-act queue, design point 6. This rule is an invariant, not an
+  aspiration.)
 - **Queries never cross the wire.** `control_api` query properties
   (`approved`, `is_resumed`) are local-only; remote state reads come from
   `snap()` — export to phase `variables` anything a consumer is missing.
@@ -712,6 +723,91 @@ events, output deep-reads as the lone fetch, commands as signals — **the
 node accepts no calls**; its access point reduces to a doorbell receiver.
 Accepted cost: command latency goes from RPC-RTT to write+nudge (tens of
 ms) — irrelevant at approve/resume/stop pacing.
+
+### 6. Coordination: claim-then-act — the lock is the state
+
+**Agreed direction (replaces the check-then-act protocol in `runjob/coord.py`).**
+
+**The finding that forced this.** Coordination correctness does not need
+*fresh* state — it needs the check and the occupancy marker to be **serialized
+with the lock**: anything that won its check before I acquired the lock must be
+visible to my check. The persister→poll pipeline is an eventually-consistent
+replica and cannot provide that ordering *by construction* — no interval tuning
+fixes it (a mutex with a detection window is not a mutex). Reading storage
+directly does not fix it either: the occupancy marker itself (the mutex phase's
+RUNNING stage) reaches the DB only at the next persister flush — the marker is
+written on the async lane, so no synchronous read can see what was not written.
+Check-then-act is therefore broken on the `postgres` kind (and any future
+brokered kind), and only incidentally correct on unix sockets, whose live RPC
+reads happen to be current.
+
+**Two lanes, stated as doctrine:**
+
+- **Observation lane** (persister → storage → poll; events): dashboards,
+  monitoring, wake-ups, soft ordering. Eventual consistency is its *contract*,
+  not a defect.
+- **Coordination**: correctness decisions come only from **atomic primitives**
+  (`LockProvider` claims). Coordination never reads the observation lane to
+  *decide* — only to be polite (queue ordering below) or to decorate
+  diagnostics.
+
+**Decision — claim-then-act.** The atomic operation's success *is* the
+decision; there is no view to be stale:
+
+- **Mutex** (`MutualExclusionPhase`): no-wait claim of the group lock at phase
+  start, **held for the protected child's whole run**, released after; a failed
+  claim = OVERLAP. Deletes the check (env-wide query + phase search) entirely.
+  Also fixes the pre-existing false-OVERLAP race (near-simultaneous starters
+  could kill each other — a checker cannot distinguish *contending* from
+  *occupying* when reading RUNNING stages; an atomic try-claim has no such
+  ambiguity). Lost: the "overlapped with instance X" log detail — recoverable
+  best-effort from the observation lane for the message only, never for the
+  decision.
+- **Queue** (`ExecutionQueue`): capacity becomes **N slot claims**
+  (`eq-{group}#0..N-1`) — try-claim any, hold while the child runs, release
+  after. Capacity is a hard invariant enforced with no shared view. Strict FIFO
+  is **relaxed to soft ordering**: before claiming, peek the observation lane
+  and yield the round if a strictly older QUEUED instance is visible —
+  politeness bounded by attempts/time (a ghost entry from a dead node must not
+  block the group; safe to override precisely because it is not correctness).
+  Wake-ups stay event-driven (phase-ended events + rescan timeout) — a stale or
+  late wake-up is just a failed try. Deletes `_dispatch_next` (the distributed
+  dispatcher: env-wide query, sort, remote state parsing, RPC dispatch loop)
+  and the cross-instance `signal_dispatch` control call; instances dispatch
+  themselves. `IN_QUEUE`/`DISPATCHED` phase states remain for observability.
+
+**Consequence for point 5.** `signal_dispatch()` was the only remote phase op
+with a return value — the case that would have forced request/response
+emulation over signals. After this redesign the whole remote control surface
+(`approve`/`resume`/`stop`) is `None`-returning and idempotent, and the queue
+no longer depends on remote phase control at all — it unblocks on the
+`postgres` kind without waiting for signals-as-state.
+
+**Crash story.** Claims release with their holder (flock: kernel; advisory:
+session end) — coordination has **no dependency on heartbeat/liveness** and no
+cleanup machinery. The rejected alternative — repairing check-then-act with
+write-through occupancy under the lock plus poll-bypassing reads — needed a
+fairness tiebreak on top and left a dead node's RUNNING marker blocking its
+group until heartbeat lands: most machinery, worst crash story. Recorded so it
+is not re-litigated.
+
+**Long holds on Postgres — allowed, with care.** A session advisory lock on an
+autocommit connection holds **no transaction**: no xmin pin, no vacuum/bloat
+impact, no table locks — one idle backend plus one lock-table entry. The
+pattern is production-precedented (Que/GoodJob hold an advisory lock per job
+for its whole execution; leader election holds one per process lifetime). Care
+items, owed to the connection rather than the server: TCP keepalives on lock
+connections; the environment `location` must be a **direct DSN** (session
+advisory locks are incompatible with transaction-mode poolers); release already
+warns if the connection died mid-hold. Cost profile: one pinned connection per
+*running* protected job; the consolidation path if it ever bites is one session
+per node holding many keys, fronted by in-process per-key gates.
+
+**Lock contract addition.** `Lock` grows a **no-wait acquire** (the deferred
+try-lock — its consumer arrived; the advisory implementation already has the
+zero-timeout path, file/memory pass the flag through). The blocking-with-timeout
+acquire remains for the public `node.lock()` surface. Migration blast radius:
+the two `coord.py` call sites are the only in-house lock clients.
 
 ## Kept decisions
 
@@ -764,18 +860,30 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **The `postgres` producer slice.** Node access point + advisory locks;
-   `node.connect` raises `NotImplementedError` for the `postgres` kind until it
-   lands. Intervals already set (active 250ms, idle 2s, flush 250ms — see
-   point 4).
-2. **Shared open helper (mechanical refactor).** The per-kind connect functions
+1. **Coordination redesign — claim-then-act (design point 6).** Mutex → held
+   group lock (no-wait claim, OVERLAP on failure); queue → N slot claims +
+   bounded soft-FIFO yield, deleting `_dispatch_next` and remote
+   `signal_dispatch`; `Lock` contract grows the no-wait acquire. Prerequisite
+   for coordination on the `postgres` kind — check-then-act over the polled
+   view is broken by construction.
+2. **The `postgres` producer slice.** Compose `node._connect_postgres`
+   (optional access point = `None`; polling sibling connector;
+   `create_lock_provider(entry)`); `node.connect` raises for the kind until it
+   lands. Ships with claim-then-act coordination (#1), or with mutex/queue
+   raising not-supported until #1 lands. Also merge the node's own live
+   instances into its active-run reads — the polled view alone lags even for
+   self-instances (observation quality, independent of coordination).
+   Intervals already set (active 250ms, idle 2s, flush 250ms — see point 4).
+3. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
-3. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
+4. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
    per flush tick for non-ended runs; readers interpret-never-mutate (stale
    heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible.
-4. Signals-as-state for commands (design point 5, post-transport).
-5. Resolve the `JobInstance` contract split when it bites (open point 1;
+   (Coordination no longer depends on this — point 6; observation still does.)
+5. Signals-as-state for commands (design point 5, post-transport — simplified
+   by point 6: no remote op carries a return value).
+6. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
 Done since the last revision: the backend-kind slice — `EnvironmentKind` enum,
