@@ -30,8 +30,10 @@ kind's connector directory. Internally, storage, directory/live transport,
 locks, and output remain separate units with narrow interfaces; a kind wires a
 supported combination. `NOTIFY` doorbells/triggers stay the deferred
 escalation path.
-**Agreed, not yet implemented:** coordination redesign — claim-then-act (point
-6); it is a prerequisite for coordination on the `postgres` kind.
+**Implemented:** coordination redesign — claim-then-act (point 6): mutex holds
+its group claim, queue claims slots with seniority-staggered attempts;
+`signal_dispatch` and the distributed dispatcher are deleted. The `postgres`
+kind's coordination prerequisite is met.
 **Open:** the `postgres` producer slice (the node raises until then);
 heartbeat/liveness (point 4, deferred); split the `JobInstance` contract
 (deferred until it bites); signals-as-state (point 5).
@@ -726,7 +728,7 @@ ms) — irrelevant at approve/resume/stop pacing.
 
 ### 6. Coordination: claim-then-act — the lock is the state
 
-**Agreed direction (replaces the check-then-act protocol in `runjob/coord.py`).**
+**Implemented (replaced the check-then-act protocol in `runjob/coord.py`).**
 
 **The finding that forced this.** Coordination correctness does not need
 *fresh* state — it needs the check and the occupancy marker to be **serialized
@@ -766,10 +768,15 @@ decision; there is no view to be stale:
 - **Queue** (`ExecutionQueue`): capacity becomes **N slot claims**
   (`eq-{group}#0..N-1`) — try-claim any, hold while the child runs, release
   after. Capacity is a hard invariant enforced with no shared view. Strict FIFO
-  is **relaxed to soft ordering**: before claiming, peek the observation lane
-  and yield the round if a strictly older QUEUED instance is visible —
-  politeness bounded by attempts/time (a ghost entry from a dead node must not
-  block the group; safe to override precisely because it is not correctness).
+  is **relaxed to seniority-staggered claims**: before claiming, count the
+  visibly older IN_QUEUE instances of the group in the observation lane and
+  delay the attempt proportionally (`rank × stagger interval`), so older
+  waiters get first pick after each wake-up. Politeness, not protocol: a stale
+  view can invert order but never capacity, and a ghost entry from a dead node
+  merely adds one stagger step per attempt — no deadline or override machinery
+  needed. (An earlier yield-with-deadline variant was replaced: its budget,
+  anchored at queue entry, expired during saturation — exactly when fairness
+  matters — and decline-based handoff had no channel to wake the older waiter.)
   Wake-ups stay event-driven (phase-ended events + rescan timeout) — a stale or
   late wake-up is just a failed try. Deletes `_dispatch_next` (the distributed
   dispatcher: env-wide query, sort, remote state parsing, RPC dispatch loop)
@@ -860,40 +867,34 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **Coordination redesign — claim-then-act (design point 6).** Mutex → held
-   group lock (no-wait claim, OVERLAP on failure); queue → N slot claims +
-   bounded soft-FIFO yield, deleting `_dispatch_next` and remote
-   `signal_dispatch`; `Lock` contract grows the no-wait acquire. Prerequisite
-   for coordination on the `postgres` kind — check-then-act over the polled
-   view is broken by construction.
-2. **The `postgres` producer slice.** Compose `node._connect_postgres`
+1. **The `postgres` producer slice.** Compose `node._connect_postgres`
    (optional access point = `None`; polling sibling connector;
    `create_lock_provider(entry)`); `node.connect` raises for the kind until it
-   lands. Ships with claim-then-act coordination (#1), or with mutex/queue
-   raising not-supported until #1 lands. Also merge the node's own live
-   instances into its active-run reads — the polled view alone lags even for
-   self-instances (observation quality, independent of coordination).
+   lands. Its coordination prerequisite (point 6) is met. Also merge the node's
+   own live instances into its active-run reads — the polled view alone lags
+   even for self-instances (observation quality, independent of coordination).
    Intervals already set (active 250ms, idle 2s, flush 250ms — see point 4).
-3. **Shared open helper (mechanical refactor).** The per-kind connect functions
+2. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
-4. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
+3. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
    per flush tick for non-ended runs; readers interpret-never-mutate (stale
    heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible.
    (Coordination no longer depends on this — point 6; observation still does.)
-5. Signals-as-state for commands (design point 5, post-transport — simplified
+4. Signals-as-state for commands (design point 5, post-transport — simplified
    by point 6: no remote op carries a return value).
-6. Resolve the `JobInstance` contract split when it bites (open point 1;
+5. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
-Done since the last revision: the backend-kind slice — `EnvironmentKind` enum,
-`EnvironmentEntry.kind` (typed, registry key `kind`, fixing the old `driver`
-write/read mismatch), per-kind config classes replacing the `transport`
-discriminator (config carries neither `id` nor `kind`), one `match entry.kind`
-per entry point (connector + node), `load_database_module` replaced by env.py's
-`_db_module` table, unix factories taking `root_dir` directly. The poll lane is
-now user-selectable as the `postgres` kind (connector-side); `in_process`
-remains a direct constructor. Landed across runcore, runjob, taro, and runcli.
+Done since the last revision: the coordination redesign (point 6) — mutex holds
+its no-wait group claim for the protected child's run; the queue claims per-group
+slot locks with seniority-staggered attempts (rank × stagger delay per visibly
+older waiter — ghosts only delay, never block); `_dispatch_next`, remote
+`signal_dispatch`, and the remote-state parsing are deleted; the `Lock` contract
+grew `try_acquire` across all three providers (memory locks made non-reentrant to
+match file/advisory claim semantics). Before that: the backend-kind slice —
+`EnvironmentKind` on the entry, per-kind config classes, one `match entry.kind`
+per entry point, the `LockProvider` seam extraction, and `AdvisoryLockProvider`.
 
 ## Cross-references
 
