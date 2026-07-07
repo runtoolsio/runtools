@@ -171,8 +171,9 @@ PostgreSQL storage + DB-polling instance directory + advisory locks. Nodes run j
 remote connectors through the run-state persister (coalesced snapshot writes, observed by polling — no
 direct node contact); job coordination (mutex, queue) works across machines via session advisory locks.
 **Remote control is not supported yet** — `stop`/phase operations on another node's instances raise until
-signals-as-state lands; liveness detection (crashed-node visibility) is also pending. The environment
-`location` must be a direct DSN (session advisory locks are incompatible with transaction-mode poolers).
+signals-as-state lands. Crashed nodes are detected via heartbeats: a run whose node stops attesting liveness
+is reported as lost by consumers (never auto-terminated). The environment `location` must be a direct DSN
+(session advisory locks are incompatible with transaction-mode poolers).
 
 ### In-process (not a kind)
 

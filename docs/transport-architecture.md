@@ -41,9 +41,11 @@ nodes hold the sibling `InstanceDirectory` directly (the embedded sibling
 connector is gone — it duplicated the node's own db/store references and
 muddled close ownership); node live reads merge own instances over the
 directory view.
-**Open:** heartbeat/liveness (point 4, deferred — now urgent: postgres
-producers can crash and leave ghost actives); split the `JobInstance`
-contract (deferred until it bites); signals-as-state (point 5).
+**Implemented:** heartbeat/liveness (point 4) — nodes touch `heartbeat_at` on
+the flush thread; readers get server-clock heartbeat *ages* through the version
+scan and mark stale proxies lost (interpret-never-mutate).
+**Open:** split the `JobInstance` contract (deferred until it bites);
+signals-as-state (point 5).
 
 ## Mental model
 
@@ -523,9 +525,12 @@ Timestamps:
   active-write guard above). Note: the poll receiver's change-detection cursor is
   the write-time `updated_at`, not this — `state_updated_at` is the *apply* guard,
   `updated_at` is the *re-read* cursor (two roles, see the poll section).
-- **`heartbeat_at`** — **deferred, not implemented.** The liveness column +
-  reconciler are a later track (see Remaining work); for now an abruptly-died
-  node's active rows simply persist until reconciliation exists.
+- **`heartbeat_at`** (column, **implemented**) — liveness attestation, touched by the
+  node on a slow cadence (below). Written in the *storage's* clock (postgres:
+  `now()`), and read back only as a server-computed **age** on the version scan —
+  one clock measures both edges, so node/consumer skew cancels and consumers never
+  parse or compare liveness timestamps. Never a change-detection cursor and never
+  bumps `updated_at` (a heartbeat must not trigger consumer deep reads).
 
 Calibration: coalescing makes writes/sec ≈ active-changing-instances × (1/flush)
 — at the 250ms flush, ~400/s for a 100-instance env (still well inside a small
@@ -549,15 +554,20 @@ events admit unknown instances, update proxies, and remove/tombstone on `ENDED`.
 That model deliberately has a liveness gap until heartbeat/reconciliation lands:
 an instance whose node dies without emitting `ENDED` can remain in the view.
 
-**Liveness.** `heartbeat_at` per non-ended run, touched on the flush tick
-(~10–30s; staleness threshold ~3×) independent of state writes. Readers
-*interpret, never mutate*: an active row with a stale `heartbeat_at` displays
-as lost/unknown — writing `ABANDONED` would break single-writer-per-instance
-and race across connectors; an explicit reaper is a separate later decision.
-This makes abruptly-died nodes' instances *visible and attributable* — a
-capability RPC discovery structurally lacks (dead socket = invisible instance).
-Per-node heartbeat (one row per node + writer-id column) is the measured
-optimisation if envs grow large.
+**Liveness (implemented).** `heartbeat_at` per non-ended run, touched by the node
+on the persister flush thread every `HEARTBEAT_INTERVAL` (15s; retry-fast on the
+250ms tick after a failed touch) — deliberately the *same thread* as the flush,
+so the heartbeat attests exactly the lane consumers depend on (a wedged flush
+thread reads as lost, never alive-but-frozen). The version scan returns a
+server-computed `heartbeat_age`; `PollingInstanceDirectory` marks a proxy lost
+past 3× the interval (logged once on the transition), and
+`SnapshotJobInstanceProxy` exposes `heartbeat_age`/`is_lost`. Readers
+*interpret, never mutate*: a lost run stays in the view, visible and
+attributable — writing `ABANDONED` would break single-writer-per-instance and
+race across connectors; an explicit reaper is a separate later decision. This
+is a capability RPC discovery structurally lacks (dead socket = invisible
+instance). Per-node heartbeat (one row per node + writer-id column) is the
+measured optimisation if envs grow large.
 
 **The discovery seam: `InstanceDiscovery`.** Event-driven directories never
 think in storage — they think in *initial snapshots + live events*. Discovery is
@@ -875,25 +885,23 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
-   per flush tick for non-ended runs; readers interpret-never-mutate (stale
-   heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible —
-   now urgent, since postgres producers exist and a crashed one leaves ghost
-   actives in every consumer's view. (Coordination no longer depends on this —
-   point 6; observation does.)
-2. Signals-as-state for commands (design point 5 — simplified by point 6: no
+1. Signals-as-state for commands (design point 5 — simplified by point 6: no
    remote op carries a return value). Fills in `PostgresInstanceAccessPoint`
    (the doorbell/reconciler) and lifts the consumer-side proxies'
    `NotImplementedError` on `stop`/phase control.
-3. **Shared open helper (mechanical refactor).** The per-kind connect functions
+2. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
-4. Live output reads for snapshot proxies (output lane — undesigned; history
+3. Live output reads for snapshot proxies (output lane — undesigned; history
    output already works where the backend is shared, e.g. S3).
-5. Resolve the `JobInstance` contract split when it bites (open point 1;
+4. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
-Done since the last revision: the coordination redesign (point 6) — mutex holds
+Done since the last revision: heartbeat/liveness (point 4) — `heartbeat_at`
+column (no schema bump, pre-release), node touches on the flush thread
+(`HEARTBEAT_INTERVAL` 15s), server-clock `heartbeat_age` on the version scan,
+lost-marking in the polling directory with `heartbeat_age`/`is_lost` on the
+snapshot proxy. Before that: the coordination redesign (point 6) — mutex holds
 its no-wait group claim for the protected child's run; the queue claims per-group
 slot locks with seniority-staggered attempts (rank × stagger delay per visibly
 older waiter — ghosts only delay, never block); `_dispatch_next`, remote
