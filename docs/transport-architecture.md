@@ -44,8 +44,11 @@ directory view.
 **Implemented:** heartbeat/liveness (point 4) — nodes touch `heartbeat_at` on
 the flush thread; readers get server-clock heartbeat *ages* through the version
 scan and mark stale proxies lost (interpret-never-mutate).
-**Open:** split the `JobInstance` contract (deferred until it bites);
-signals-as-state (point 5).
+**Agreed, not yet implemented:** signals-as-state (point 5 — full
+implementation plan in the section: one envelope for stop + phase control,
+mailbox table with delete-on-apply, `JobRun.control_requests` as the durable
+record, poll-first delivery).
+**Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
 
@@ -714,9 +717,9 @@ skipped. Postgres tests run against a throwaway container via testcontainers.
 
 ### 5. Commands are signals: desired state, not calls
 
-**Agreed direction (post-Phase C).** Phase ops (and eventually `stop`) stop
-being RPC calls and become consumer-written *signal records* the owning
-phase reconciles against — the Kubernetes desired-state model. What RPC
+**Agreed direction.** Remote control ops — `stop` and phase ops alike —
+stop being RPC calls and become consumer-written *signal records* the owning
+node reconciles against — the Kubernetes desired-state model. What RPC
 cannot give: **durability** (an `approve` survives node restarts and
 consumer disconnects) and a free audit trail (who signalled, when).
 
@@ -725,8 +728,10 @@ Rules:
 - **Separate signal store, consumer-written** — never the node's run row
   (preserves single-writer-per-instance). Keyed by instance/phase/op.
 - **State is truth, event is doorbell.** Write the signal, nudge over the
-  transport; the phase checks on nudge, coarse poll (~seconds) as fallback.
-  Zero steady-state polling.
+  transport; the node checks on nudge, coarse poll (~seconds) as the floor.
+  The first slice runs the coarse poll alone; the payload-less `NOTIFY`
+  doorbell is the same additive escalation as the state lane's (point 4) —
+  "zero steady-state polling" is the doorbell end state, not the entry bar.
 - **Remote phase ops return `None` and are idempotent.** All remaining ops
   (`approve`, `resume`, and eventually `stop`) comply — they set an event and
   return nothing; re-delivery is harmless. Outcome is observed via phase
@@ -743,6 +748,61 @@ events, output deep-reads as the lone fetch, commands as signals — **the
 node accepts no calls**; its access point reduces to a doorbell receiver.
 Accepted cost: command latency goes from RPC-RTT to write+nudge (tens of
 ms) — irrelevant at approve/resume/stop pacing.
+
+**Implementation plan (agreed).**
+
+**One envelope for all remote control — `stop` is the degenerate phase-less
+op.** Signals reuse the shape the unix RPC already speaks
+(`_exec_phase_op(phase_id, op_name, *args)`); no per-op signal kinds:
+
+```text
+signals table (env db, consumer-written mailbox):
+  job_id | run_id | ordinal      -- target instance
+  phase_id                       -- NULL for instance-level ops (stop)
+  op | args (JSON)               -- any control_api op; args JSON-serializable
+  requested_by | requested_at
+```
+
+Because the envelope is generic, every `None`-returning idempotent
+`control_api` op — user-defined phases included — becomes remotely invocable
+with zero op-specific code. Queries stay local per the rule above.
+
+**Lifecycle — row = in-flight command; run = permanent record; logs =
+anomalies:**
+
+1. The consumer proxy (`stop()` / `_exec_phase_op`) inserts the row and
+   returns — no reply lane exists or is needed.
+2. The node's signal reconciler (what fills `PostgresInstanceAccessPoint`)
+   reads pending rows for its registered instances and applies each at the
+   shared apply point: instance ops → `instance.stop(...)`; phase ops →
+   `find_phase_control(phase_id)` → the `control_api` method — exactly what
+   the unix RPC server does, fed from a table instead of a socket.
+3. The apply point records the request into the run's own state —
+   **`JobRun.control_requests`** (op, phase_id, args, requested_by,
+   requested_at, applied_at) — node-written (single-writer preserved), flushed
+   by the persister like any state, retained with the run's history. Because
+   control activity is *state*, polled consumers synthesize the control event
+   from the snapshot diff — observability parity across kinds without a wire
+   event. (`InstanceControlEvent` extends from stop-only to the generic
+   (phase_id, op) payload, emitted at the same apply point — the live-lane
+   nicety; the durable record is `control_requests`.)
+4. The reconciler **deletes the applied row** — its `requested_by`/
+   `requested_at` were folded into the run record, so the row holds nothing
+   unique. Un-appliable rows (unknown instance/phase, non-`control_api` op)
+   are logged loudly (full row) and deleted; never-applied rows stay pending
+   until an orphan sweep — visible for exactly as long as they mean something.
+   If compliance-grade request retention is ever demanded, delete-on-apply
+   flips to mark-processed + TTL additively (the read adds a WHERE clause).
+
+**Why the run-side record** (not signal-row status flips, not wire events):
+one authority owned by the single writer; synthesizable for polled kinds;
+audit travels with the run into history; and it collapses consumption
+semantics to delete-on-apply — the mailbox stays a mailbox.
+
+Rejected along the way: message-only delivery (proxy → access point call
+without the mailbox) — loses durability, the core motivation: a command for
+an absent node must wait, not evaporate; on the DB kind the only carrier
+would be `NOTIFY`, which drops when nobody listens.
 
 ### 6. Coordination: claim-then-act — the lock is the state
 
@@ -885,10 +945,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Signals-as-state for commands (design point 5 — simplified by point 6: no
-   remote op carries a return value). Fills in `PostgresInstanceAccessPoint`
-   (the doorbell/reconciler) and lifts the consumer-side proxies'
-   `NotImplementedError` on `stop`/phase control.
+1. Signals-as-state for commands (design point 5 — plan agreed, see the
+   section). The slice: signals mailbox table (both backends), the node-side
+   reconciler filling `PostgresInstanceAccessPoint` (coarse poll first),
+   `JobRun.control_requests` + snapshot-diff synthesis of control events,
+   consumer proxies' `stop`/`_exec_phase_op` become signal writes (lifting
+   their `NotImplementedError`), `InstanceControlEvent` generalized and
+   emitted at the shared apply point, orphan-row sweep.
 2. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
