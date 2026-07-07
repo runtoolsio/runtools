@@ -15,8 +15,8 @@ An environment is selected by its **kind** — a curated backend bundle naming a
 live transport, and coordination (not independent knobs):
 
 - **`local`** — SQLite storage + unix-socket instance directory + file locks. The zero-config default.
-- **`postgres`** — PostgreSQL storage + DB-polling instance directory. Observe-only for now: connectors work,
-  running a node raises until the producer slice lands.
+- **`postgres`** — PostgreSQL storage + DB-polling instance directory + advisory locks. Runs and observes
+  jobs across machines; remote control (stop/phase ops) is pending signals-as-state.
 
 Each kind composes:
 
@@ -167,9 +167,12 @@ on a single machine: socket files, component dirs, and liveness `flock`s live un
 
 ### `postgres`
 
-PostgreSQL storage + DB-polling instance directory. Connectors observe active runs by polling the environment
-database rather than contacting producing nodes. **Observe-only for now** — `node.connect` raises
-`NotImplementedError` until the producer slice (node access point + advisory locks) lands.
+PostgreSQL storage + DB-polling instance directory + advisory locks. Nodes run jobs whose state reaches
+remote connectors through the run-state persister (coalesced snapshot writes, observed by polling — no
+direct node contact); job coordination (mutex, queue) works across machines via session advisory locks.
+**Remote control is not supported yet** — `stop`/phase operations on another node's instances raise until
+signals-as-state lands; liveness detection (crashed-node visibility) is also pending. The environment
+`location` must be a direct DSN (session advisory locks are incompatible with transaction-mode poolers).
 
 ### In-process (not a kind)
 

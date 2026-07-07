@@ -34,9 +34,16 @@ escalation path.
 its group claim, queue claims slots with seniority-staggered attempts;
 `signal_dispatch` and the distributed dispatcher are deleted. The `postgres`
 kind's coordination prerequisite is met.
-**Open:** the `postgres` producer slice (the node raises until then);
-heartbeat/liveness (point 4, deferred); split the `JobInstance` contract
-(deferred until it bites); signals-as-state (point 5).
+**Implemented:** the `postgres` producer slice — `node.connect` composes
+postgres storage + polling sibling directory + advisory locks +
+`PostgresInstanceAccessPoint` (an empty receiver until signals-as-state);
+nodes hold the sibling `InstanceDirectory` directly (the embedded sibling
+connector is gone — it duplicated the node's own db/store references and
+muddled close ownership); node live reads merge own instances over the
+directory view.
+**Open:** heartbeat/liveness (point 4, deferred — now urgent: postgres
+producers can crash and leave ghost actives); split the `JobInstance`
+contract (deferred until it bites); signals-as-state (point 5).
 
 ## Mental model
 
@@ -51,7 +58,7 @@ a local one.
 ```
    consumer process                          producer process
   ┌────────────────────┐                   ┌────────────────────┐
-  │ _Connector         │                   │ _Node              │
+  │ _Connector         │                   │ _ComposedNode      │
   │   directory ──────┐│                   │   access_point ───┐│
   │   db (history)    ││                   │   instances       ││
   └───────────────────││                   └───────────────────││
@@ -130,7 +137,7 @@ green everywhere, not designed up front.
 ```python
 class EnvironmentKind(StrEnum):
     LOCAL = "local"        # sqlite + unix-socket directory + file locks
-    POSTGRES = "postgres"  # postgres + polling directory (observe-only until the producer slice)
+    POSTGRES = "postgres"  # postgres + polling directory + advisory locks
     # DISTRIBUTED = "distributed"  # later: postgres + redis directory/locks
 ```
 
@@ -218,8 +225,9 @@ def _connect_local(entry):
 # _connect_postgres: same shape with postgres.create(entry) and NO exists pre-check — postgres
 # open() is validate-only (never DDL) and raises the more precise
 # EnvironmentStoreNotProvisionedError; directory = PollingInstanceDirectory(env_db).
-# runjob/node.py connect: same match; LOCAL builds stores/features/access point inline;
-# POSTGRES raises NotImplementedError ("observed but not produced") until the producer slice.
+# runjob/node.py connect: same match; each kind's function composes the node inline
+# (LOCAL: unix transport pair + file locks; POSTGRES: polling directory + advisory locks
+# + empty PostgresInstanceAccessPoint until signals-as-state).
 ```
 
 Each branch names its driver directly — no entry→db helper on the connect path (an earlier
@@ -242,8 +250,8 @@ local entry is `EnvironmentEntry(id="local", kind=LOCAL)`.
 **Settled decisions:**
 - `in_process` stays a direct constructor (`node.in_process(...)`), *not* a registry kind; its
   `node._create` branch is removed (registry kinds are LOCAL/POSTGRES).
-- `postgres` kind is observe-only until the producer slice (node access point + advisory locks)
-  lands — the node raises for it.
+- `postgres` kind runs and observes jobs; remote control (`stop`/phase ops) stays unsupported
+  until signals-as-state fills in the node's receiving end.
 - `kind` lives once, on the entry; the config carries neither `kind` nor `id` (external
   discrimination) — no `entry == config` invariant.
 - `root_dir` (and later `redis`) are configuration (used post-open), not locator — on the per-kind
@@ -867,22 +875,21 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **The `postgres` producer slice.** Compose `node._connect_postgres`
-   (optional access point = `None`; polling sibling connector;
-   `create_lock_provider(entry)`); `node.connect` raises for the kind until it
-   lands. Its coordination prerequisite (point 6) is met. Also merge the node's
-   own live instances into its active-run reads — the polled view alone lags
-   even for self-instances (observation quality, independent of coordination).
-   Intervals already set (active 250ms, idle 2s, flush 250ms — see point 4).
-2. **Shared open helper (mechanical refactor).** The per-kind connect functions
+1. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
+   per flush tick for non-ended runs; readers interpret-never-mutate (stale
+   heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible —
+   now urgent, since postgres producers exist and a crashed one leaves ghost
+   actives in every consumer's view. (Coordination no longer depends on this —
+   point 6; observation does.)
+2. Signals-as-state for commands (design point 5 — simplified by point 6: no
+   remote op carries a return value). Fills in `PostgresInstanceAccessPoint`
+   (the doorbell/reconciler) and lifts the consumer-side proxies'
+   `NotImplementedError` on `stop`/phase control.
+3. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
-3. Liveness/heartbeat (deferred slice of point 4): `heartbeat_at` column touched
-   per flush tick for non-ended runs; readers interpret-never-mutate (stale
-   heartbeat → lost/unknown). Makes abruptly-died nodes' instances visible.
-   (Coordination no longer depends on this — point 6; observation still does.)
-4. Signals-as-state for commands (design point 5, post-transport — simplified
-   by point 6: no remote op carries a return value).
+4. Live output reads for snapshot proxies (output lane — undesigned; history
+   output already works where the backend is shared, e.g. S3).
 5. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
