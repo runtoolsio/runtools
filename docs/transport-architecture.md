@@ -708,7 +708,24 @@ upgrade later is additive, not a rewrite.
 **Storage backends.** `EnvironmentDatabase` has two implementations: `SQLite`
 (in-process/dev, one connection guarded by a process lock) and `PostgreSQL`
 (networked/concurrent, `psycopg_pool` connection pool, native `JSONB` +
-`TIMESTAMPTZ`, lets the DB serialize writers). The criteria→SQL translation and
+`TIMESTAMPTZ`, lets the DB serialize writers).
+
+**Storage model — document + projections (implemented).** The `runs` table
+stores each run as **one whole document** (`run` column = `JobRun.serialize()`
+— the wire format *is* the storage format; `NULL` marks an init-only row,
+which is also the materialized-row check). The discrete columns are strictly
+**query projections** derived from the document at write (`created`,
+`started`, `ended`, `exec_time`, `termination_status`, `warnings` — criteria
+SQL, sorts, stats; plus the `run_tags` junction) and the persistence
+machinery's own timestamps (`updated_at`, `state_updated_at`,
+`heartbeat_at`). A JobRun is never reassembled from projections. Rationale:
+rows were already written whole on every store and criteria SQL is by design
+a superset *prefilter* (Python re-applies the full match), so the table
+behaved as a document store with indexes — the schema now admits it, new
+`JobRun` fields cost zero storage changes, and the two serializations of one
+aggregate (wire vs column-pieces) collapsed into one. Init-only rows carry
+identity + tags only; params/features become readable once the first
+snapshot lands. The criteria→SQL translation and
 the read-path helpers are shared in `runcore/db/sql.py` (`build_where_clause`
 returning `(where, params, complete)`, `matching_pks`, `last_run_ids`,
 `build_order_by`, `build_job_stats`); each backend supplies only a small
@@ -964,11 +981,15 @@ Rejected along the way (keep this list — the candidates keep coming back):
 4. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
-Done since the last revision: heartbeat/liveness (point 4) — `heartbeat_at`
+Done since the last revision: the document + projections storage model (see
+point 4 — whole-run `run` column, discrete columns demoted to query
+projections, both backends); the signals-as-state storage slice shipped dark
+(`signals` mailbox + `ControlRequest`/`JobRun.control_requests`). Before
+that: heartbeat/liveness (point 4) — `heartbeat_at`
 column (no schema bump, pre-release), node touches on the flush thread
 (`HEARTBEAT_INTERVAL` 15s), server-clock `heartbeat_age` on the version scan,
 lost-marking in the polling directory with `heartbeat_age`/`is_lost` on the
-snapshot proxy. Before that: the coordination redesign (point 6) — mutex holds
+snapshot proxy; and the coordination redesign (point 6) — mutex holds
 its no-wait group claim for the protected child's run; the queue claims per-group
 slot locks with seniority-staggered attempts (rank × stagger delay per visibly
 older waiter — ghosts only delay, never block); `_dispatch_next`, remote
