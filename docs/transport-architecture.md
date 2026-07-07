@@ -44,10 +44,14 @@ directory view.
 **Implemented:** heartbeat/liveness (point 4) — nodes touch `heartbeat_at` on
 the flush thread; readers get server-clock heartbeat *ages* through the version
 scan and mark stale proxies lost (interpret-never-mutate).
-**Agreed, not yet implemented:** signals-as-state (point 5 — full
+**Agreed, storage shipped dark:** signals-as-state (point 5 — full
 implementation plan in the section: one envelope for stop + phase control,
 mailbox table with delete-on-apply, `JobRun.control_requests` as the durable
-record, poll-first delivery).
+record, poll-first delivery). The storage slice is implemented on both
+backends — `signals` table + `SignalStorage` (write/read/delete),
+`ControlRequest` + `JobRun.control_requests` persisted with the run and
+feeding `last_updated` (so control-only changes pass the newer-wins guard).
+The reconciler/proxy slice that turns it on is next.
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
