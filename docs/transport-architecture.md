@@ -247,10 +247,13 @@ dispatch the branch had just decided; the shared exists-guard also masked postgr
 precise not-provisioned error). `_create_env_db` stays env-private for the generic config
 functions (`load_env_config`/`save_env_config`), which do need runtime dispatch.
 
-The open+load boilerplate is deliberately duplicated across the per-kind functions (four sites,
-~6 lines each). Known follow-up, applied only once all repos are green: extract
-`_open_configured_environment(entry, config_type)`. Kept out of the slice so the first landing
-introduces zero new abstractions.
+The open+load boilerplate was deliberately duplicated across the per-kind functions at first
+(four sites, ~6 lines each) so the first landing introduced zero new abstractions; once all
+repos were green it was extracted as `env.open_configured_db(env_db, env_id,
+config_type)` — a context manager (close-on-failure covers the branch's whole composition, not
+just the load; the store stays open on success). It takes the created db, not the entry: an
+entry-taking helper would re-run inside the branch the kind dispatch the branch had just
+decided — the same flaw that killed `_create_env_db` on this path.
 
 **Deleted:** `load_database_module` (env.py's `_db_module` table replaces it), `TransportType`,
 the transport-config classes, the `TransportConfig` union, `EnvironmentConfig.transport`,
@@ -987,27 +990,24 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **Shared open helper (mechanical refactor).** The per-kind connect functions
-   duplicate the open-db/load-config boilerplate (four sites); extract
-   `_open_configured_environment(entry, config_type)` as its own small commit.
-2. Live output reads for snapshot proxies (output lane — undesigned; history
+1. Live output reads for snapshot proxies (output lane — undesigned; history
    output already works where the backend is shared, e.g. S3).
-3. **Lost-run reaper.** A crashed owner's rows stay CREATED/RUNNING forever —
+2. **Lost-run reaper.** A crashed owner's rows stay CREATED/RUNNING forever —
    consumers list them as active indefinitely; only the heartbeat verdict marks
    them lost, and nothing ever finalizes them. The signal sweep already handles
    the mailbox half (stale-heartbeat targets are orphans); the reaper is the
    run-row half. To decide: who reaps (node sweep? operator command first?),
    the terminal status for a reaped run, and the safety window relative to
    `HEARTBEAT_STALE_AFTER`.
-4. **Surface liveness to consumers (taro).** `heartbeat_age`/`is_lost` exist
+3. **Surface liveness to consumers (taro).** `heartbeat_age`/`is_lost` exist
    only on `SnapshotJobInstanceProxy`; `get_active_runs()` returns `JobRun`s,
    which carry no liveness field (deliberately — the node doesn't know it, and
    `JobRun` is the wire+storage format). Displaying LOST in `ps`/`dash` is
    trivial; the model decision — how the connector read path exposes a
    consumer-side verdict alongside snapshots — is the actual work.
-5. Resolve the `JobInstance` contract split when it bites (open point 1;
+4. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
-6. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
+5. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
    when the orphan sweep switched to heartbeat attestation — keep as a generic
    identity-projection primitive or drop it.
 
