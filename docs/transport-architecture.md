@@ -574,7 +574,8 @@ past 3× the interval (logged once on the transition), and
 `SnapshotJobInstanceProxy` exposes `heartbeat_age`/`is_lost`. Readers
 *interpret, never mutate*: a lost run stays in the view, visible and
 attributable — writing `ABANDONED` would break single-writer-per-instance and
-race across connectors; an explicit reaper is a separate later decision. This
+race across connectors; an explicit reaper is a separate later decision (now
+queued in Remaining work, together with surfacing the lost verdict in taro). This
 is a capability RPC discovery structurally lacks (dead socket = invisible
 instance). Per-node heartbeat (one row per node + writer-id column) is the
 measured optimisation if envs grow large.
@@ -991,8 +992,24 @@ Rejected along the way (keep this list — the candidates keep coming back):
    `_open_configured_environment(entry, config_type)` as its own small commit.
 2. Live output reads for snapshot proxies (output lane — undesigned; history
    output already works where the backend is shared, e.g. S3).
-3. Resolve the `JobInstance` contract split when it bites (open point 1;
+3. **Lost-run reaper.** A crashed owner's rows stay CREATED/RUNNING forever —
+   consumers list them as active indefinitely; only the heartbeat verdict marks
+   them lost, and nothing ever finalizes them. The signal sweep already handles
+   the mailbox half (stale-heartbeat targets are orphans); the reaper is the
+   run-row half. To decide: who reaps (node sweep? operator command first?),
+   the terminal status for a reaped run, and the safety window relative to
+   `HEARTBEAT_STALE_AFTER`.
+4. **Surface liveness to consumers (taro).** `heartbeat_age`/`is_lost` exist
+   only on `SnapshotJobInstanceProxy`; `get_active_runs()` returns `JobRun`s,
+   which carry no liveness field (deliberately — the node doesn't know it, and
+   `JobRun` is the wire+storage format). Displaying LOST in `ps`/`dash` is
+   trivial; the model decision — how the connector read path exposes a
+   consumer-side verdict alongside snapshots — is the actual work.
+5. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
+6. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
+   when the orphan sweep switched to heartbeat attestation — keep as a generic
+   identity-projection primitive or drop it.
 
 Done since the last revision: the control-surface redesign — `exec_control_op`
 deleted as a conceptual API; recording moved into the instance-returned
