@@ -36,7 +36,8 @@ its group claim, queue claims slots with seniority-staggered attempts;
 kind's coordination prerequisite is met.
 **Implemented:** the `postgres` producer slice — `node.connect` composes
 postgres storage + polling sibling directory + advisory locks +
-`PostgresInstanceAccessPoint` (an empty receiver until signals-as-state);
+`PostgresInstanceAccessPoint` (an empty receiver at that point — now the
+signal reconciler, point 5);
 nodes hold the sibling `InstanceDirectory` directly (the embedded sibling
 connector is gone — it duplicated the node's own db/store references and
 muddled close ownership); node live reads merge own instances over the
@@ -44,14 +45,13 @@ directory view.
 **Implemented:** heartbeat/liveness (point 4) — nodes touch `heartbeat_at` on
 the flush thread; readers get server-clock heartbeat *ages* through the version
 scan and mark stale proxies lost (interpret-never-mutate).
-**Agreed, storage shipped dark:** signals-as-state (point 5 — full
-implementation plan in the section: one envelope for stop + phase control,
-mailbox table with delete-on-apply, `JobRun.control_requests` as the durable
-record, poll-first delivery). The storage slice is implemented on both
-backends — `signals` table + `SignalStorage` (write/read/delete),
-`ControlRequest` + `JobRun.control_requests` persisted with the run and
-feeding `last_updated` (so control-only changes pass the newer-wins guard).
-The reconciler/proxy slice that turns it on is next.
+**Implemented:** signals-as-state (point 5) — remote `stop` and phase control
+work on the `postgres` kind: consumer proxies write mailbox rows, the node's
+signal reconciler (`PostgresInstanceAccessPoint`, coarse poll) applies them at
+the instance's control apply point, which records `JobRun.control_requests`
+(the durable, single-writer audit) and emits the generalized
+`InstanceControlEvent`; polled consumers synthesize the same event from the
+snapshot diff. Applied rows are deleted; orphans swept on a slow cadence.
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -233,10 +233,12 @@ def _connect_local(entry):
 
 # _connect_postgres: same shape with postgres.create(entry) and NO exists pre-check — postgres
 # open() is validate-only (never DDL) and raises the more precise
-# EnvironmentStoreNotProvisionedError; directory = PollingInstanceDirectory(env_db).
+# EnvironmentStoreNotProvisionedError; directory = PollingInstanceDirectory(env_db,
+# lambda run: SnapshotJobInstanceProxy(run, env_db)) — proxy capabilities (command channel via
+# the SignalSender facet) are composition-site wiring, not the directory's.
 # runjob/node.py connect: same match; each kind's function composes the node inline
 # (LOCAL: unix transport pair + file locks; POSTGRES: polling directory + advisory locks
-# + empty PostgresInstanceAccessPoint until signals-as-state).
+# + PostgresInstanceAccessPoint, the signal reconciler).
 ```
 
 Each branch names its driver directly — no entry→db helper on the connect path (an earlier
@@ -259,8 +261,9 @@ local entry is `EnvironmentEntry(id="local", kind=LOCAL)`.
 **Settled decisions:**
 - `in_process` stays a direct constructor (`node.in_process(...)`), *not* a registry kind; its
   `node._create` branch is removed (registry kinds are LOCAL/POSTGRES).
-- `postgres` kind runs and observes jobs; remote control (`stop`/phase ops) stays unsupported
-  until signals-as-state fills in the node's receiving end.
+- `postgres` kind shipped running and observing jobs first; remote control (`stop`/phase ops)
+  was deferred to signals-as-state — since implemented (point 5), the receiving end being the
+  signal reconciler.
 - `kind` lives once, on the entry; the config carries neither `kind` nor `id` (external
   discrimination) — no `entry == config` invariant.
 - `root_dir` (and later `redis`) are configuration (used post-open), not locator — on the per-kind
@@ -610,8 +613,9 @@ flush thread), the `updated_at` + `state_updated_at` columns, `store_active_runs
 `read_active_runs`, `active_run_versions()`, and `DbInstanceDiscovery` — across
 both storage backends (SQLite, PostgreSQL). The poll directory is built too:
 `PollingInstanceDirectory` (version scan + deep-read-changed + evict-absent) +
-`SnapshotJobInstanceProxy` + snapshot-diff synthesis. What remains is *selecting*
-it as a backend kind (Remaining work #1), plus the heartbeat track. The poll
+`SnapshotJobInstanceProxy` + snapshot-diff synthesis. What remained was *selecting*
+it as a backend kind and the heartbeat track — both since done (the `postgres`
+kind composes it; heartbeats ride the flush thread). The poll
 subsumes the reconciler — it *is* the periodic complete sweep.
 
 **PostgreSQL backend live state — poll + snapshot-diff (default).** The
@@ -680,7 +684,8 @@ Intervals:
   the UI repaint rate, never from the poll.
 
 Output remains separate (own transport/storage path, not reconstructed from
-`runs`); commands/RPC remain separate until signals-as-state lands.
+`runs`); commands ride the signals mailbox (point 5) — a separate lane from
+observation by design.
 
 **Escalation path (not built — only if measured scale demands it).** A
 payload-less `NOTIFY` **doorbell**, fired by the producer on write, lets the
@@ -760,9 +765,12 @@ Rules:
   have forced request/response emulation over signals — is eliminated by the
   claim-then-act queue, design point 6. This rule is an invariant, not an
   aspiration.)
-- **Queries never cross the wire.** `control_api` query properties
-  (`approved`, `is_resumed`) are local-only; remote state reads come from
-  `snap()` — export to phase `variables` anything a consumer is missing.
+- **Queries never cross the wire — `control_api` is commands-only.** The
+  decorator rejects properties (`TypeError` at class definition); readable
+  state — local or remote — comes from `snap()`. Export to phase `variables`
+  anything a consumer is missing. (Query properties like `approved` existed
+  briefly as "local-only"; they were removed once the control surface became
+  the recording apply point — reads are not part of the command channel.)
 
 End-state across the transport: discovery via DB (point 4), state via
 events, output deep-reads as the lone fetch, commands as signals — **the
@@ -770,7 +778,7 @@ node accepts no calls**; its access point reduces to a doorbell receiver.
 Accepted cost: command latency goes from RPC-RTT to write+nudge (tens of
 ms) — irrelevant at approve/resume/stop pacing.
 
-**Implementation plan (agreed).**
+**Implementation plan (implemented as designed).**
 
 **One envelope for all remote control — `stop` is the degenerate phase-less
 op.** Signals reuse the shape the unix RPC already speaks
@@ -781,7 +789,7 @@ signals table (env db, consumer-written mailbox):
   job_id | run_id | ordinal      -- target instance
   phase_id                       -- NULL for instance-level ops (stop)
   op | args (JSON)               -- any control_api op; args JSON-serializable
-  requested_by | requested_at
+  requested_at                   -- row timestamp; the orphan sweep's age bound
 ```
 
 Because the envelope is generic, every `None`-returning idempotent
@@ -793,25 +801,37 @@ anomalies:**
 
 1. The consumer proxy (`stop()` / `_exec_phase_op`) inserts the row and
    returns — no reply lane exists or is needed.
-2. The node's signal reconciler (what fills `PostgresInstanceAccessPoint`)
-   reads pending rows for its registered instances and applies each at the
-   shared apply point: instance ops → `instance.stop(...)`; phase ops →
-   `find_phase_control(phase_id)` → the `control_api` method — exactly what
-   the unix RPC server does, fed from a table instead of a socket.
-3. The apply point records the request into the run's own state —
-   **`JobRun.control_requests`** (op, phase_id, args, requested_by,
-   requested_at, applied_at) — node-written (single-writer preserved), flushed
-   by the persister like any state, retained with the run's history. Because
+2. The node's signal reconciler (`PostgresInstanceAccessPoint`) reads pending
+   rows for its registered instances and decodes each envelope onto the
+   instance's **public control surface** — instance ops → `instance.stop(...)`;
+   phase ops → `find_phase_control_by_id(phase_id)` → the `control_api`
+   method — exactly the call path a local caller or the unix RPC server uses.
+   There is no separate command-dispatch API on the instance (an earlier
+   `exec_control_op` was deleted): transports convert envelopes into direct
+   calls; the envelope is plumbing, not a conceptual API.
+3. The instance records the request into the run's own state at the control
+   surface itself: `find_phase_control` returns a recording wrapper over the
+   phase's raw `PhaseControl`, so **every** command path — local call, RPC,
+   signal — records **`JobRun.control_requests`** (op, phase_id, args,
+   applied_at) — node-written (single-writer preserved), flushed by the
+   persister like any state, retained with the run's history. The record is
+   appended after validation but *before* the op is invoked — an op that
+   immediately finalizes the run (approve unblocking the last gate) would
+   otherwise store a terminal snapshot missing the command, and late appends
+   never reach a terminal row. Because
    control activity is *state*, polled consumers synthesize the control event
    from the snapshot diff — observability parity across kinds without a wire
    event. (`InstanceControlEvent` extends from stop-only to the generic
    (phase_id, op) payload, emitted at the same apply point — the live-lane
    nicety; the durable record is `control_requests`.)
-4. The reconciler **deletes the applied row** — its `requested_by`/
-   `requested_at` were folded into the run record, so the row holds nothing
+4. The reconciler **deletes the applied row** — the applied op is already on
+   the run record, so the row holds nothing
    unique. Un-appliable rows (unknown instance/phase, non-`control_api` op)
    are logged loudly (full row) and deleted; never-applied rows stay pending
    until an orphan sweep — visible for exactly as long as they mean something.
+   Orphan = an aged row whose target run is gone *or whose owner stopped
+   heartbeating* — a crashed node's runs stay non-ended forever, so lifecycle
+   state alone would leak their pending signals indefinitely.
    If compliance-grade request retention is ever demanded, delete-on-apply
    flips to mark-processed + TTL additively (the read adds a WHERE clause).
 
@@ -966,26 +986,34 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Signals-as-state for commands (design point 5 — plan agreed, see the
-   section). The slice: signals mailbox table (both backends), the node-side
-   reconciler filling `PostgresInstanceAccessPoint` (coarse poll first),
-   `JobRun.control_requests` + snapshot-diff synthesis of control events,
-   consumer proxies' `stop`/`_exec_phase_op` become signal writes (lifting
-   their `NotImplementedError`), `InstanceControlEvent` generalized and
-   emitted at the shared apply point, orphan-row sweep.
-2. **Shared open helper (mechanical refactor).** The per-kind connect functions
+1. **Shared open helper (mechanical refactor).** The per-kind connect functions
    duplicate the open-db/load-config boilerplate (four sites); extract
    `_open_configured_environment(entry, config_type)` as its own small commit.
-3. Live output reads for snapshot proxies (output lane — undesigned; history
+2. Live output reads for snapshot proxies (output lane — undesigned; history
    output already works where the backend is shared, e.g. S3).
-4. Resolve the `JobInstance` contract split when it bites (open point 1;
+3. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
-Done since the last revision: the document + projections storage model (see
-point 4 — whole-run `run` column, discrete columns demoted to query
-projections, both backends); the signals-as-state storage slice shipped dark
-(`signals` mailbox + `ControlRequest`/`JobRun.control_requests`). Before
-that: heartbeat/liveness (point 4) — `heartbeat_at`
+Done since the last revision: the control-surface redesign — `exec_control_op`
+deleted as a conceptual API; recording moved into the instance-returned
+`_RecordingPhaseControl` wrapper (record-before-invoke preserved), so local
+calls, the unix RPC server, and the signal reconciler all record through the
+same public call path (the former remaining-work item "route unix RPC through
+the apply point" dissolved — the RPC server already resolved controls via the
+instance); `control_api` is commands-only (properties rejected, the query
+properties removed); requester audit (`requested_by`/`requested_at` on
+`ControlRequest` and the signals row's `requested_by`) dropped for now — no
+consumer reads it; re-adding is additive (document storage absorbs new
+`ControlRequest` fields; a transport-set ambient context can carry identity).
+Earlier: signals-as-state (point 5) — the reconciler in
+`PostgresInstanceAccessPoint` (coarse poll + orphan sweep), consumer proxy
+signal writes, snapshot-diff synthesis
+of control events, and the persister observing control events (a control-only
+change must reach consumers). Before that: the document + projections storage
+model (point 4 — whole-run `run` column, discrete columns demoted to query
+projections, both backends); the signals-as-state storage slice
+(`signals` mailbox + `ControlRequest`/`JobRun.control_requests`);
+heartbeat/liveness (point 4) — `heartbeat_at`
 column (no schema bump, pre-release), node touches on the flush thread
 (`HEARTBEAT_INTERVAL` 15s), server-clock `heartbeat_age` on the version scan,
 lost-marking in the polling directory with `heartbeat_age`/`is_lost` on the

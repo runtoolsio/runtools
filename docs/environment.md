@@ -16,7 +16,7 @@ live transport, and coordination (not independent knobs):
 
 - **`local`** — SQLite storage + unix-socket instance directory + file locks. The zero-config default.
 - **`postgres`** — PostgreSQL storage + DB-polling instance directory + advisory locks. Runs and observes
-  jobs across machines; remote control (stop/phase ops) is pending signals-as-state.
+  jobs across machines; remote control (stop/phase ops) works via the signals mailbox.
 
 Each kind composes:
 
@@ -170,10 +170,14 @@ on a single machine: socket files, component dirs, and liveness `flock`s live un
 PostgreSQL storage + DB-polling instance directory + advisory locks. Nodes run jobs whose state reaches
 remote connectors through the run-state persister (coalesced snapshot writes, observed by polling — no
 direct node contact); job coordination (mutex, queue) works across machines via session advisory locks.
-**Remote control is not supported yet** — `stop`/phase operations on another node's instances raise until
-signals-as-state lands. Crashed nodes are detected via heartbeats: a run whose node stops attesting liveness
-is reported as lost by consumers (never auto-terminated). The environment `location` must be a direct DSN
-(session advisory locks are incompatible with transaction-mode poolers).
+Remote control (`stop`/phase operations such as `approve`) works via the signals mailbox: the command is
+written to the database and applied by the owning node within its poll interval (~1s); the applied
+operation is recorded in the run's history (`control_requests`). A pending command does not outlive its
+target — runs die with their node, so a command posted around an owning-node crash is never applied (the
+run is reported lost, see below, and the pending command is eventually swept from the mailbox). Crashed nodes are
+detected via heartbeats: a run whose node stops attesting liveness is reported as lost by consumers (never
+auto-terminated). The environment `location` must be a direct DSN (session advisory locks are incompatible
+with transaction-mode poolers). Live output streaming from another node's instances is not supported yet.
 
 ### In-process (not a kind)
 
