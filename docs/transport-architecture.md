@@ -52,6 +52,9 @@ the instance's control apply point, which records `JobRun.control_requests`
 (the durable, single-writer audit) and emits the generalized
 `InstanceControlEvent`; polled consumers synthesize the same event from the
 snapshot diff. Applied rows are deleted; orphans swept on a slow cadence.
+**Agreed:** the output lane (point 7) — live tail through a bounded, UNLOGGED
+per-instance tail table in the env db (the node's tail buffer made shared);
+pull-only, no output events on the polled kind. Not yet implemented.
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -456,11 +459,15 @@ unrepresentable. Accepted costs: uncovered reads pay one RPC per call
 are the wire-event versions (possibly truncated per `truncate_length`) —
 full lines always come from an uncovered read.
 
-`get_output_tail` carries `mode` on the wire (optional param defaulting to
-TAIL, so older clients keep working); the node's `InMemoryTailBuffer`
-applies HEAD/TAIL natively. Known gap, shared server idiom: an invalid enum
-string on the wire (`Mode[mode]`, `StopReason[...]`) surfaces as an internal
-error rather than invalid-params.
+`get_output_tail` carries only `max_lines` on the wire (`0` = all retained).
+The `Mode` enum (HEAD/TAIL) was removed from the whole tail chain — HEAD
+never delivered its implied meaning on any live path (a bounded buffer's
+"head" is the oldest *retained* line, not the start of job output; true
+head-of-output belongs to the complete stored-output read, a different API),
+and no production caller used it. One contract everywhere: newest retained
+lines, oldest first. Known gap, shared server idiom: an invalid enum string
+on the wire (`StopReason[...]`) surfaces as an internal error rather than
+invalid-params.
 
 Open: shape of the opt-in escape hatch for confirmed-current reads
 (`refresh()` / `snap(fresh=True)` — never the default path); how discovery
@@ -688,8 +695,8 @@ Intervals:
   the UI repaint rate, never from the poll.
 
 Output remains separate (own transport/storage path, not reconstructed from
-`runs`); commands ride the signals mailbox (point 5) — a separate lane from
-observation by design.
+`runs` — live tail rides its own bounded table, point 7); commands ride the
+signals mailbox (point 5) — a separate lane from observation by design.
 
 **Escalation path (not built — only if measured scale demands it).** A
 payload-less `NOTIFY` **doorbell**, fired by the producer on write, lets the
@@ -939,6 +946,124 @@ zero-timeout path, file/memory pass the flag through). The blocking-with-timeout
 acquire remains for the public `node.lock()` surface. Migration blast radius:
 the two `coord.py` call sites are the only in-house lock clients.
 
+### 7. Output lane: bounded tail through the DB — designed
+
+**The need, exactly.** `inst.output.tail(mode, max_lines)` on a *running*
+instance from another machine. The surface already exists — `taro tail` and
+the TUI output panel call it, and the local kind serves it (event-fed proxy
+buffer + RPC `get_output_tail` reading the node's `InMemoryTailBuffer`). On
+the `postgres` kind `SnapshotJobInstanceProxy._fetch_output_tail` raises —
+there is no wire to the node and nothing readable elsewhere mid-run (S3 sinks
+buffer-and-PUT at close; file sinks are node-local). No new user-facing API:
+the work is giving that one hook something to read. History output is out of
+scope — it already works via `output_locations` + backends after finalize.
+
+**Decision.** The node's tail buffer, made shared: a bounded per-instance
+output tail in the environment database. The db is this kind's transport —
+signals proved the pattern for commands; this is the same move for output.
+Full output continues to flow to the configured output backends (durable,
+history path, unchanged); the db carries only a capped rolling tail per
+*active* instance — a cache, not a second durable copy.
+
+```text
+output_tail table (env db, node-written, bounded per instance, UNLOGGED):
+  job_id | run_id | ordinal      -- instance
+  line_ordinal                   -- OutputLine.ordinal (already monotonic)
+  line (JSON)                    -- serialized OutputLine
+```
+
+- **Per-line rows, not a tail document.** Appends are cheap (no whole-document
+  rewrite — the runs-row lesson), `line_ordinal` gives incremental reads
+  (`WHERE line_ordinal > ?`) for follow-style tailing, and pruning is a DELETE
+  of everything below `max - cap`.
+- **UNLOGGED (Postgres).** The schema itself declares the tail expendable:
+  WAL for state (runs, signals, heartbeats), no WAL for cache. Append+prune
+  churn skips the WAL stream, replication, and checkpoint pressure. Crash
+  recovery truncates the table — it refills within seconds from ongoing
+  appends of still-running instances, and the durable output was never here.
+  Not replicated to standbys — irrelevant: this kind already requires a
+  direct primary DSN (advisory locks). SQLite has no equivalent; the sqlite
+  facet implementation simply ignores the concept (backend-internal asymmetry,
+  like `now()` vs `julianday`) and exists for test parity — the local kind
+  serves tail over RPC.
+- **Node side — always-on writes.** A db tail sink on the output router —
+  batches lines, flushes coalesced, prunes to the cap. Cap is in lines,
+  configured under `PostgresEnvironmentConfig.output`. Every running instance
+  publishes its tail unconditionally, like the run-state persister: a
+  request-triggered variant (write only while someone tails) was considered
+  and rejected — it needs a full subscription/lease protocol (rows, renewal,
+  expiry, node-side activation state) that dwarfs the writes it saves, adds
+  1–2s first-read latency, and loses the crash-forensics property: with
+  always-on, the last output lines of a *lost* run are already in the table
+  when its node dies (the in-memory buffer that held them just evaporated).
+  If fleet-scale cost ever demands it, lease-based activation is additive
+  behind the same facet — readers never know the difference.
+  Two write-cost guards: **one batched flush per node** per cadence (all its
+  instances in one statement — txn rate scales with nodes, not instances),
+  and **insert only the last `cap` lines of each batch** (anything beyond
+  would be pruned immediately; this bounds per-instance write rate at
+  cap × cadence regardless of output volume — outlier-safe by construction).
+  Budget check: this lane is *lighter* than the run-state lane (tiny
+  WAL-free rows vs whole logged JSONB rewrites at up to 4/s per instance);
+  the live set is bounded (~cap × line size per instance), so vacuum churn
+  can't compound.
+- **Consumer side: pull-only, on demand.** `_fetch_output_tail` reads the
+  facet. No output events on the polled kind — the directory never polls
+  output (volume would dwarf the run-state version scan; cost lands only on
+  instances someone actually tails). `_ProxyOutput`'s completeness logic
+  already routes to the remote fetch when its event-fed buffer is empty, so
+  the proxy base is untouched. Follow mode = repeated incremental fetches by
+  `line_ordinal`; ~poll-interval latency, fine at human-watching pacing.
+- **Wiring:** a narrow facet pair split like the signals one — write side for
+  the node's sink, read side for proxies — and the proxy factory earns its
+  keep as designed: the composition-site lambda gains the output reader; the
+  directory is untouched.
+- **Lifecycle:** rows removed by a *delayed* sweep after the run ends, not
+  synchronously at `_finalize_run` — a follower polls incrementally, and
+  delete-at-finalize would race away the lines between its last poll and the
+  cleanup; a grace period covering a poll cycle closes that. A crashed
+  owner's rows are orphans for the same age+heartbeat sweep family (another
+  reaper datapoint).
+- **Reader obligation:** tolerate `line_ordinal` gaps — the lower bound moves
+  by design (prune), and an UNLOGGED truncate restarts mid-stream. Tail
+  semantics already permit both.
+
+**Accepted costs.** Bounded MVCC churn per active chatty instance (append +
+prune — same budget argument as the run-state flush); the cap means live reads
+cannot page unbounded scrollback of a running job — complete output arrives
+with finalize via the backends.
+
+**Rejected:**
+
+- **Live reads from stored output (S3 batch upload).** Multipart parts are
+  invisible until `CompleteMultipartUpload` — useless for live reads; the real
+  variant is chunk objects (periodic small PUTs, compacted at close), which is
+  a sink-lifecycle redesign (chunk naming/indexing, compaction, crash-orphaned
+  chunks, list+merge readers) with 5–30s latency and a hard availability
+  regression: it works only where a *shared* backend is configured, making
+  live tail conditional on extra infrastructure the kind doesn't otherwise
+  need.
+- **NOTIFY-carried output** — payload caps, drops when nobody listens, no
+  late joiners; NOTIFY stays escalation-only per point 4.
+- **Direct node RPC for output** — breaks "the node accepts no calls";
+  reintroduces addressing exactly where the kind removed it.
+
+**Decoupled track — crash-durable output storage.** Rejected above as the
+*tail* mechanism, durable incremental output writing is independently
+valuable: close-time-only sinks mean a crashed node's stored output is lost
+entirely today. Preferred candidate: a **postgres output storage type** —
+one more entry in the existing sink/backend family (`output.storages`
+config), not a new seam and *not combined with the tail* (the tail stays
+the uniform live mechanism regardless of storage choice; the two meet only
+as sinks on the same router). Fit profile: light-to-moderate output — the
+output lives next to the run history (one store, one retention, SQL over
+lines) and completes the kind's cross-machine *history* output story with
+zero extra infrastructure; heavy-output estates keep S3 (per-env choice),
+where chunked upload remains the durability option. A later read
+optimization (serving tail from the durable table where pg storage is
+configured) is possible but deliberately unplanned — S3/file envs need the
+cache anyway. Own track, own slice — explicitly not a tail dependency.
+
 ## Kept decisions
 
 - **Transport split & one-way dependency.** Connector/node are
@@ -990,8 +1115,11 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Live output reads for snapshot proxies (output lane — undesigned; history
-   output already works where the backend is shared, e.g. S3).
+1. Output lane (point 7 — **designed**; slice (a) implemented). Slices: (a)
+   output-tail storage facet + both backends — **done**; (b) node-side db tail
+   sink + delayed cleanup sweep; (c) `_fetch_output_tail` on the snapshot
+   proxy + taro follow via incremental fetch. Decoupled: chunked backend
+   upload (crash-durable output) is its own later track.
 2. **Lost-run reaper.** A crashed owner's rows stay CREATED/RUNNING forever —
    consumers list them as active indefinitely; only the heartbeat verdict marks
    them lost, and nothing ever finalizes them. The signal sweep already handles
