@@ -575,7 +575,7 @@ That model deliberately has a liveness gap until heartbeat/reconciliation lands:
 an instance whose node dies without emitting `ENDED` can remain in the view.
 
 **Liveness (implemented).** `heartbeat_at` per non-ended run, touched by the node
-on the persister flush thread every `HEARTBEAT_INTERVAL` (15s; retry-fast on the
+on the node's flush thread every `HEARTBEAT_INTERVAL` (15s; retry-fast on the
 250ms tick after a failed touch) — deliberately the *same thread* as the flush,
 so the heartbeat attests exactly the lane consumers depend on (a wedged flush
 thread reads as lost, never alive-but-frozen). The version scan returns a
@@ -986,9 +986,17 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   facet implementation simply ignores the concept (backend-internal asymmetry,
   like `now()` vs `julianday`) and exists for test parity — the local kind
   serves tail over RPC.
-- **Node side — always-on writes.** A db tail sink on the output router —
-  batches lines, flushes coalesced, prunes to the cap. Cap is in lines,
-  configured under `PostgresEnvironmentConfig.output`. Every running instance
+- **Producer side — always-on writes, owned by the access point.** The db
+  access point subscribes its `OutputTailPublisher` to each registered
+  instance's output notifications — the unix kind already publishes instance
+  events through registration-time observer subscription; the db kind does
+  the same for the output tail. The router and node never learn the tail
+  exists (universal storage-lane machinery on the node; kind-specific
+  transport-lane machinery in the access point bundle). Staged lines flush
+  coalesced on the access point's poll tick; prune to the cap. Cap is in lines,
+  configured under `PostgresEnvironmentConfig.output`; `tail_cap=0` disables
+  publishing entirely — the per-env escape hatch for pathological producers
+  (negative values are rejected at config load). Every running instance
   publishes its tail unconditionally, like the run-state persister: a
   request-triggered variant (write only while someone tails) was considered
   and rejected — it needs a full subscription/lease protocol (rows, renewal,
@@ -1115,18 +1123,26 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Output lane (point 7 — **designed**; slice (a) implemented). Slices: (a)
-   output-tail storage facet + both backends — **done**; (b) node-side db tail
-   sink + delayed cleanup sweep; (c) `_fetch_output_tail` on the snapshot
-   proxy + taro follow via incremental fetch. Decoupled: chunked backend
-   upload (crash-durable output) is its own later track.
-2. **Lost-run reaper.** A crashed owner's rows stay CREATED/RUNNING forever —
-   consumers list them as active indefinitely; only the heartbeat verdict marks
-   them lost, and nothing ever finalizes them. The signal sweep already handles
-   the mailbox half (stale-heartbeat targets are orphans); the reaper is the
-   run-row half. To decide: who reaps (node sweep? operator command first?),
-   the terminal status for a reaped run, and the safety window relative to
-   `HEARTBEAT_STALE_AFTER`.
+1. Output lane (point 7 — **designed**; slices (a)+(b) implemented). Slices:
+   (a) output-tail storage facet + both backends — **done**; (b) the
+   `OutputTailPublisher`, an instance-output observer owned by the db access
+   point (subscribed at registration, flushed on its poll loop) +
+   heartbeat/linger-aware cleanup in the orphan sweep — **done**; (c) `_fetch_output_tail` on the snapshot proxy + taro
+   follow via incremental fetch. Decoupled: chunked backend upload
+   (crash-durable output) is its own later track.
+2. **Lost-run reaper + no-live-node cleanup.** A crashed owner's rows stay
+   CREATED/RUNNING forever — consumers list them as active indefinitely; only
+   the heartbeat verdict marks them lost, and nothing ever finalizes them. The
+   node-side orphan sweep handles the mailbox and tail halves (stale-heartbeat
+   targets), but it runs on live nodes only: an env whose last node is gone
+   keeps its orphan signal/tail rows until the next node start (first-tick
+   sweep) or, for tails, a postgres restart (UNLOGGED truncate) — bounded, but
+   indefinite. Consumers must not sweep (readers interpret, never mutate), so
+   the durable path is operator/maintenance: extend `taro env prune` to delete
+   signal/tail rows of ended-or-missing instances (no liveness policy needed),
+   with crashed-run rows following once the reaper finalizes them. To decide:
+   who reaps (node sweep? operator command first?), the terminal status for a
+   reaped run, and the safety window relative to `HEARTBEAT_STALE_AFTER`.
 3. **Surface liveness to consumers (taro).** `heartbeat_age`/`is_lost` exist
    only on `SnapshotJobInstanceProxy`; `get_active_runs()` returns `JobRun`s,
    which carry no liveness field (deliberately — the node doesn't know it, and
