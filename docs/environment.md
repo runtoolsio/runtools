@@ -177,7 +177,12 @@ target — runs die with their node, so a command posted around an owning-node c
 run is reported lost, see below, and the pending command is eventually swept from the mailbox). Crashed nodes are
 detected via heartbeats: a run whose node stops attesting liveness is reported as lost by consumers (never
 auto-terminated). The environment `location` must be a direct DSN (session advisory locks are incompatible
-with transaction-mode poolers). Live output streaming from another node's instances is not supported yet.
+with transaction-mode poolers). Live output of another node's instances is readable as a bounded
+tail (roughly the newest `tail_cap` lines — the cap is amortized, so briefly up to about twice
+that may be retained between prune cycles; roughly 1–2 s behind live; `tail_cap: 0` disables
+tail publishing); complete output is available from the configured output storages once the run ends.
+Follow-style tailing (`taro tail -f`) is not live on this kind yet — it currently rides output
+events, which polled transports do not carry.
 
 ### In-process (not a kind)
 

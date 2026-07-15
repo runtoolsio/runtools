@@ -52,9 +52,11 @@ the instance's control apply point, which records `JobRun.control_requests`
 (the durable, single-writer audit) and emits the generalized
 `InstanceControlEvent`; polled consumers synthesize the same event from the
 snapshot diff. Applied rows are deleted; orphans swept on a slow cadence.
-**Agreed:** the output lane (point 7) — live tail through a bounded, UNLOGGED
-per-instance tail table in the env db (the node's tail buffer made shared);
-pull-only, no output events on the polled kind. Not yet implemented.
+**Implemented:** the output lane (point 7) — live tail through a bounded,
+UNLOGGED per-instance tail table in the env db (the node's tail buffer made
+shared); publisher owned by the db access point (registration-time observer
+subscription), pull-only consumer reads via the snapshot proxy. `taro tail -f`
+on polled kinds remains a consumer-side follow-up.
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -946,7 +948,7 @@ zero-timeout path, file/memory pass the flag through). The blocking-with-timeout
 acquire remains for the public `node.lock()` surface. Migration blast radius:
 the two `coord.py` call sites are the only in-house lock clients.
 
-### 7. Output lane: bounded tail through the DB — designed
+### 7. Output lane: bounded tail through the DB — implemented
 
 **The need, exactly.** `inst.output.tail(mode, max_lines)` on a *running*
 instance from another machine. The surface already exists — `taro tail` and
@@ -1034,7 +1036,10 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   reaper datapoint).
 - **Reader obligation:** tolerate `line_ordinal` gaps — the lower bound moves
   by design (prune), and an UNLOGGED truncate restarts mid-stream. Tail
-  semantics already permit both.
+  semantics already permit both. The cap itself is *amortized*: pruning
+  triggers after ~cap appended lines, so a running instance may briefly
+  retain up to ~2× cap rows — the bound governs churn and storage, not an
+  exact read size (reads bound themselves via ``max_lines``).
 
 **Accepted costs.** Bounded MVCC churn per active chatty instance (append +
 prune — same budget argument as the run-state flush); the cap means live reads
@@ -1123,13 +1128,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Output lane (point 7 — **designed**; slices (a)+(b) implemented). Slices:
-   (a) output-tail storage facet + both backends — **done**; (b) the
-   `OutputTailPublisher`, an instance-output observer owned by the db access
-   point (subscribed at registration, flushed on its poll loop) +
-   heartbeat/linger-aware cleanup in the orphan sweep — **done**; (c) `_fetch_output_tail` on the snapshot proxy + taro
-   follow via incremental fetch. Decoupled: chunked backend upload
-   (crash-durable output) is its own later track.
+1. **`taro tail -f` on polled kinds.** Follow mode rides output events, which
+   polled transports do not carry — it needs a taro-side incremental poll loop
+   (client-side dedup by line ordinal; ``read_output_tail``'s ``after_ordinal``
+   parameter is the reserved server-side optimization). One-shot `taro tail`
+   works remotely today via the proxy's tail read. Decoupled from the lane:
+   chunked/durable backend upload (crash-durable output; pg output storage is
+   the preferred candidate — see point 7) is its own later track.
 2. **Lost-run reaper + no-live-node cleanup.** A crashed owner's rows stay
    CREATED/RUNNING forever — consumers list them as active indefinitely; only
    the heartbeat verdict marks them lost, and nothing ever finalizes them. The
