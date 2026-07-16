@@ -586,8 +586,9 @@ past 3× the interval (logged once on the transition), and
 `SnapshotJobInstanceProxy` exposes `heartbeat_age`/`is_lost`. Readers
 *interpret, never mutate*: a lost run stays in the view, visible and
 attributable — writing `ABANDONED` would break single-writer-per-instance and
-race across connectors; an explicit reaper is a separate later decision (now
-queued in Remaining work, together with surfacing the lost verdict in taro). This
+race across connectors; automatic reaping was later considered and **rejected**
+(point 8) — resolving a lost run is a deliberate operator act, never a clock's;
+surfacing the lost verdict in taro is queued in Remaining work. This
 is a capability RPC discovery structurally lacks (dead socket = invisible
 instance). Per-node heartbeat (one row per node + writer-id column) is the
 measured optimisation if envs grow large.
@@ -1077,6 +1078,65 @@ optimization (serving tail from the durable table where pg storage is
 configured) is possible but deliberately unplanned — S3/file envs need the
 cache anyway. Own track, own slice — explicitly not a tail dependency.
 
+### 8. Lost runs: classification, not reaping — decided
+
+**The three-state model.** A stale heartbeat proves silence, not death. Consumers
+distinguish:
+
+```text
+storage-active     = row non-terminal          (the active scan)
+operationally-live = heartbeat fresh           (attestation)
+lost               = active AND not live       (SnapshotJobInstanceProxy.is_lost)
+```
+
+**Decision: no automatic reaper.** A crashed owner's rows stay non-terminal;
+consumers classify them as lost and treat them as not operationally active.
+An automatic LOST-terminalizer was designed in full and rejected:
+
+- **Silence is not death.** A partitioned or wedged node's job keeps producing
+  real side effects and may finish with a true outcome; leaving the row
+  non-terminal lets the recovered owner finalize *truthfully*. Auto-reaping at
+  any threshold discards that recoverable truth permanently (first-writer-wins
+  cuts both ways).
+- **The sweeps don't need it.** Signals and output tails already converge via
+  heartbeat attestation without terminalizing the run — liveness-based cleanup
+  of *transport artifacts* (re-sendable commands, expendable cache rows) is a
+  categorically smaller claim than fabricating a run's terminal history.
+- **What remained on the reaper's side was cosmetic**: active-scan tidiness
+  (solved by surfacing the classification) and stats inclusion (lost runs are
+  genuinely unresolved; excluding them is honest).
+
+**Principle:** *observation never mutates; resolving an unknown state is a
+deliberate act* — an operator's, not a clock's.
+
+**Deferred, designed: the operator claim (`taro env mark-lost`).** When an
+operator resolves a lost run deliberately, the write must still be race-safe
+against a recovering owner. The designed contract, kept for that day:
+
+```python
+def claim_lost_runs(stale_after: float) -> list[InstanceID]:
+    # One atomic claim: staleness proven at write time on the storage clock
+    # (candidate discovery cannot be trusted — the owner may attest between
+    # read and write), ended IS NULL, run IS NOT NULL (init-only rows have no
+    # document to terminalize). Transforms the stored document into a
+    # structurally terminal root phase so eviction replays ENDED(LOST).
+    # Implementation freedom: SELECT ... FOR UPDATE + Python-side stamp inside
+    # one transaction beats SQL document surgery (single serializer).
+```
+
+- New `TerminationStatus.LOST` mapped to `Outcome.FAULT` (UNKNOWN stays
+  reserved for unrecognized persisted codes); `terminated_at =
+  LEAST(GREATEST(heartbeat_at, started), storage_now)` — the last
+  provably-alive moment, floored against negative execution time and capped so
+  the claim never writes a timestamp in the storage clock's future (`started`
+  is node-clock domain data, so a skewed-ahead node would otherwise leak a
+  future timestamp through the floor). A lost run's duration is inherently a
+  cross-clock approximation bounded by skew — same reasoning that makes
+  heartbeat *ages* server-computed.
+- Prerequisite: **all terminal writes become conditional** (`ended IS NULL`) —
+  today's normal finalizer is unconditional, so first-writer-wins does not yet
+  hold in either direction. Required the day any second terminal writer exists.
+
 ## Kept decisions
 
 - **Transport split & one-way dependency.** Connector/node are
@@ -1135,25 +1195,21 @@ Rejected along the way (keep this list — the candidates keep coming back):
    works remotely today via the proxy's tail read. Decoupled from the lane:
    chunked/durable backend upload (crash-durable output; pg output storage is
    the preferred candidate — see point 7) is its own later track.
-2. **Lost-run reaper + no-live-node cleanup.** A crashed owner's rows stay
-   CREATED/RUNNING forever — consumers list them as active indefinitely; only
-   the heartbeat verdict marks them lost, and nothing ever finalizes them. The
-   node-side orphan sweep handles the mailbox and tail halves (stale-heartbeat
-   targets), but it runs on live nodes only: an env whose last node is gone
-   keeps its orphan signal/tail rows until the next node start (first-tick
-   sweep) or, for tails, a postgres restart (UNLOGGED truncate) — bounded, but
-   indefinite. Consumers must not sweep (readers interpret, never mutate), so
-   the durable path is operator/maintenance: extend `taro env prune` to delete
-   signal/tail rows of ended-or-missing instances (no liveness policy needed),
-   with crashed-run rows following once the reaper finalizes them. To decide:
-   who reaps (node sweep? operator command first?), the terminal status for a
-   reaped run, and the safety window relative to `HEARTBEAT_STALE_AFTER`.
-3. **Surface liveness to consumers (taro).** `heartbeat_age`/`is_lost` exist
-   only on `SnapshotJobInstanceProxy`; `get_active_runs()` returns `JobRun`s,
-   which carry no liveness field (deliberately — the node doesn't know it, and
-   `JobRun` is the wire+storage format). Displaying LOST in `ps`/`dash` is
-   trivial; the model decision — how the connector read path exposes a
-   consumer-side verdict alongside snapshots — is the actual work.
+2. **Surface liveness to consumers (taro) — the lost-run answer (point 8).**
+   `heartbeat_age`/`is_lost` exist only on `SnapshotJobInstanceProxy`;
+   `get_active_runs()` returns `JobRun`s, which carry no liveness field
+   (deliberately — the node doesn't know it, and `JobRun` is the wire+storage
+   format). With automatic reaping rejected, classification is the *only*
+   mechanism that resolves phantom actives — this item is mandatory, not
+   polish. Direction: the verdict is an instance-view concept, so expose it on
+   the `JobInstance` surface (default not-lost; snapshot proxies override) and
+   have taro read instances rather than bare snapshots where liveness matters.
+3. **Operator lost-run resolution + no-live-node cleanup.** `taro env
+   mark-lost` implementing the deferred claim contract (point 8), plus the
+   `taro env prune` extension deleting orphan signal/tail rows of
+   ended-or-missing instances — the env-without-nodes gap stays an accepted
+   operator-maintenance matter (operator commands may mutate; the observation
+   lane never does).
 4. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 5. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
