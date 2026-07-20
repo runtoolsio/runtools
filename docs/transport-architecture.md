@@ -1201,9 +1201,14 @@ Rejected along the way (keep this list — the candidates keep coming back):
    (deliberately — the node doesn't know it, and `JobRun` is the wire+storage
    format). With automatic reaping rejected, classification is the *only*
    mechanism that resolves phantom actives — this item is mandatory, not
-   polish. Direction: the verdict is an instance-view concept, so expose it on
-   the `JobInstance` surface (default not-lost; snapshot proxies override) and
-   have taro read instances rather than bare snapshots where liveness matters.
+   polish. The verdict is an instance-view concept: `InstanceLiveness` on the
+   `JobInstance` surface (default presumed-live; snapshot proxies override) —
+   **done**, and `taro ps` reads instances and renders the verdict as a
+   `LOST <age>` badge in the STATUS cell (which the badge qualifies — that
+   status is exactly what's stale) with the whole row dimmed; text badge, not
+   colour-only, so it survives pipes and NO_COLOR. Lost runs stay listed:
+   visible and attributable — **done**. Remaining: the same
+   surfacing in dash/TUI screens, and lost-aware running counts there.
 3. **Operator lost-run resolution + no-live-node cleanup.** `taro env
    mark-lost` implementing the deferred claim contract (point 8), plus the
    `taro env prune` extension deleting orphan signal/tail rows of
