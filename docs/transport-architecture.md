@@ -1195,33 +1195,31 @@ Rejected along the way (keep this list — the candidates keep coming back):
    works remotely today via the proxy's tail read. Decoupled from the lane:
    chunked/durable backend upload (crash-durable output; pg output storage is
    the preferred candidate — see point 7) is its own later track.
-2. **Surface liveness to consumers (taro) — the lost-run answer (point 8).**
-   `heartbeat_age`/`is_lost` exist only on `SnapshotJobInstanceProxy`;
-   `get_active_runs()` returns `JobRun`s, which carry no liveness field
-   (deliberately — the node doesn't know it, and `JobRun` is the wire+storage
-   format). With automatic reaping rejected, classification is the *only*
-   mechanism that resolves phantom actives — this item is mandatory, not
-   polish. The verdict is an instance-view concept: `InstanceLiveness` on the
-   `JobInstance` surface (default presumed-live; snapshot proxies override) —
-   **done**, and `taro ps` reads instances and renders the verdict as a
-   `LOST <age>` badge in the STATUS cell (which the badge qualifies — that
-   status is exactly what's stale) with the whole row dimmed; text badge, not
-   colour-only, so it survives pipes and NO_COLOR. Lost runs stay listed:
-   visible and attributable — **done**. Remaining: the same
-   surfacing in dash/TUI screens, and lost-aware running counts there.
-3. **Operator lost-run resolution + no-live-node cleanup.** `taro env
+2. **Operator lost-run resolution + no-live-node cleanup.** `taro env
    mark-lost` implementing the deferred claim contract (point 8), plus the
    `taro env prune` extension deleting orphan signal/tail rows of
    ended-or-missing instances — the env-without-nodes gap stays an accepted
    operator-maintenance matter (operator commands may mutate; the observation
    lane never does).
-4. Resolve the `JobInstance` contract split when it bites (open point 1;
+3. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
-5. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
+4. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
    when the orphan sweep switched to heartbeat attestation — keep as a generic
    identity-projection primitive or drop it.
 
-Done since the last revision: the control-surface redesign — `exec_control_op`
+Done since the last revision: liveness surfaced to consumers end-to-end (the
+lost-run answer, point 8) — `InstanceLiveness` on the `JobInstance` surface
+(default presumed-live; snapshot proxies carry the polling directory's
+verdict); rendered everywhere actives appear: `taro ps`, the dashboard and
+per-job TUI active tables, and the instance selector — `LOST <age>` badge in
+the STATUS cell (which the badge qualifies — that status is exactly what's
+stale) with the whole row dimmed via `lost_aware` column wrapping; text badge,
+not colour-only, so it survives pipes and NO_COLOR; the verdict attaches at
+paint time (`active_row`), read fresh from the proxy each repaint. The jobs
+overview counts are lost-aware: lost instances never inflate "running" (RUNNING
+cell shows them separately, e.g. `2 +1 lost`; header gains an `N lost` metric
+when nonzero). Lost runs stay listed everywhere: visible and attributable.
+Earlier: the control-surface redesign — `exec_control_op`
 deleted as a conceptual API; recording moved into the instance-returned
 `_RecordingPhaseControl` wrapper (record-before-invoke preserved), so local
 calls, the unix RPC server, and the signal reconciler all record through the
