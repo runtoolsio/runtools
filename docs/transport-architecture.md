@@ -441,25 +441,24 @@ state sends a refresh request — is rejected:
 Reads are therefore eventually consistent. The connector's `get_active_runs()`
 becomes snapshots of swept proxies.
 
-**Output: two sources, never merged.** Output events (`InstanceOutputEvent`)
-feed a bounded per-proxy buffer (100 lines — the system's conventional read
-size; the node's 2 MB tail buffer remains the deep store). One rule decides
-every read: a TAIL read for `max_lines` within the buffered count is served
-locally (the event window always ends at the live head, so its last N *are*
-the stream's last N); every other read — HEAD, `max_lines=0`, or deeper than
-buffered — is forwarded to the node with `mode` + `max_lines` and the result
-returned directly, **never merged into the buffer**. Discovery responses
-stay `JobRun`-only.
+**Output: pull and stream, strictly separate.** Proxies cache no output.
+Every `tail()` is a pull from the transport's authoritative bounded tail
+(the node's 2 MB in-memory buffer over RPC on the wire kind; the shared db
+tail on the polled kind). Output *events* are a pure streaming lane for
+subscribers — they never pass through the proxy's read path. Discovery
+responses stay `JobRun`-only.
 
-Consciously dropped: merging fetched lines into the buffer, ordinal
-bookkeeping, and bootstrap-once state. An earlier merge-based design
-produced four review findings (capped deep reads, wrong HEAD slices, frozen
-post-bootstrap horizon, mid-fetch eviction gaps) — all symptoms of caching
-with an ad-hoc coherence story. Two isolated sources make those states
-unrepresentable. Accepted costs: uncovered reads pay one RPC per call
-(exactly the old per-call semantics, never worse), and locally served lines
-are the wire-event versions (possibly truncated per `truncate_length`) —
-full lines always come from an uncovered read.
+This is the second simplification step here. The first replaced a
+merge-based cache (four review findings — capped deep reads, wrong HEAD
+slices, frozen bootstrap horizon, mid-fetch eviction gaps — all symptoms of
+caching with an ad-hoc coherence story) with an event-fed buffer serving
+covered TAIL reads locally. The buffer was then dropped entirely: its
+real callers never hit the buffer-served path (panels read `max_lines=0`,
+one-shot commands read fresh proxies), while it cost a permanent structural
+output observer per proxy — noise for any observer-based demand signal —
+plus duplicate ordering/dedup logic that display buffers implement anyway.
+Accepted cost: every `tail()` pays one transport read — at pull call rates
+(command one-shots, panel mounts), irrelevant.
 
 `get_output_tail` carries only `max_lines` on the wire (`0` = all retained).
 The `Mode` enum (HEAD/TAIL) was removed from the whole tail chain — HEAD
@@ -953,8 +952,8 @@ the two `coord.py` call sites are the only in-house lock clients.
 
 **The need, exactly.** `inst.output.tail(mode, max_lines)` on a *running*
 instance from another machine. The surface already exists — `taro tail` and
-the TUI output panel call it, and the local kind serves it (event-fed proxy
-buffer + RPC `get_output_tail` reading the node's `InMemoryTailBuffer`). On
+the TUI output panel call it, and the local kind serves it (RPC
+`get_output_tail` reading the node's `InMemoryTailBuffer`). On
 the `postgres` kind `SnapshotJobInstanceProxy._fetch_output_tail` raises —
 there is no wire to the node and nothing readable elsewhere mid-run (S3 sinks
 buffer-and-PUT at close; file sinks are node-local). No new user-facing API:
@@ -1021,18 +1020,20 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
 - **Consumer side: pull-only, on demand.** `_fetch_output_tail` reads the
   facet. No output events on the polled kind — the directory never polls
   output (volume would dwarf the run-state version scan; cost lands only on
-  instances someone actually tails). `_ProxyOutput`'s completeness logic
-  already routes to the remote fetch when its event-fed buffer is empty, so
-  the proxy base is untouched. Follow mode = repeated incremental fetches by
-  `line_ordinal`; ~poll-interval latency, fine at human-watching pacing.
+  instances someone actually tails). Proxies cache no output — `tail()`
+  always pulls the transport tail (see the pull/stream split, point 3), so
+  the proxy-side read is a straight delegate. Polled follow mode remains
+  future work: it needs a consumer-side incremental read/dedup loop by
+  `line_ordinal` (the reader's `after_ordinal` parameter is reserved for
+  a later server-side-efficient variant).
 - **Wiring:** a narrow facet pair split like the signals one — write side for
   the node's sink, read side for proxies — and the proxy factory earns its
   keep as designed: the composition-site lambda gains the output reader; the
   directory is untouched.
 - **Lifecycle:** rows removed by a *delayed* sweep after the run ends, not
-  synchronously at `_finalize_run` — a follower polls incrementally, and
-  delete-at-finalize would race away the lines between its last poll and the
-  cleanup; a grace period covering a poll cycle closes that. A crashed
+  synchronously at `_finalize_run` — delete-at-finalize could race an
+  in-flight tail read; the grace period also leaves room for a later polled
+  follower to fetch its final increment. A crashed
   owner's rows are orphans for the same age+heartbeat sweep family (another
   reaper datapoint).
 - **Reader obligation:** tolerate `line_ordinal` gaps — the lower bound moves
