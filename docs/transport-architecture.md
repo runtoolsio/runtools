@@ -460,6 +460,18 @@ plus duplicate ordering/dedup logic that display buffers implement anyway.
 Accepted cost: every `tail()` pays one transport read — at pull call rates
 (command one-shots, panel mounts), irrelevant.
 
+**Subscription surface: state demand and output demand are distinct
+registrations (implemented).** `add_observer_state_events` covers lifecycle,
+phase, control, and status; `add_observer_all_events` adds the output stream
+and is reserved for consumers that genuinely consume it (the unix access
+point's wire dispatcher; a future patternless `tail -f`). All env-wide state
+consumers (dashboard, job screen, selector, `taro live`) use the state
+variant, so merely watching an environment never expresses all-instance
+output demand. Together with the buffer removal above — which deleted the
+last structural output observer — an output subscription is now a truthful
+demand signal, the prerequisite for demand-gated output delivery on polled
+kinds (remaining work 1).
+
 `get_output_tail` carries only `max_lines` on the wire (`0` = all retained).
 The `Mode` enum (HEAD/TAIL) was removed from the whole tail chain — HEAD
 never delivered its implied meaning on any live path (a bounded buffer's
