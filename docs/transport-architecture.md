@@ -56,7 +56,8 @@ snapshot diff. Applied rows are deleted; orphans swept on a slow cadence.
 UNLOGGED per-instance tail table in the env db (the node's tail buffer made
 shared); publisher owned by the db access point (registration-time observer
 subscription), pull-only consumer reads via the snapshot proxy. `taro tail -f`
-on polled kinds remains a consumer-side follow-up.
+on polled kinds remains a follow-up: demand-gated event synthesis in the
+polling directory (remaining work 1).
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -1029,15 +1030,15 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   WAL-free rows vs whole logged JSONB rewrites at up to 4/s per instance);
   the live set is bounded (~cap × line size per instance), so vacuum churn
   can't compound.
-- **Consumer side: pull-only, on demand.** `_fetch_output_tail` reads the
-  facet. No output events on the polled kind — the directory never polls
-  output (volume would dwarf the run-state version scan; cost lands only on
-  instances someone actually tails). Proxies cache no output — `tail()`
+- **Consumer side: pull-only reads; events only under demand.**
+  `_fetch_output_tail` reads the facet. The polled kind carries no wire
+  output events, and the directory never polls output unconditionally
+  (volume would dwarf the run-state version scan) — output events are
+  synthesized per proxy only while a real output observer is registered
+  (the follow-mode design, remaining work 1), so cost lands only on
+  instances someone actually tails. Proxies cache no output — `tail()`
   always pulls the transport tail (see the pull/stream split, point 3), so
-  the proxy-side read is a straight delegate. Polled follow mode remains
-  future work: it needs a consumer-side incremental read/dedup loop by
-  `line_ordinal` (the reader's `after_ordinal` parameter is reserved for
-  a later server-side-efficient variant).
+  the proxy-side read is a straight delegate.
 - **Wiring:** a narrow facet pair split like the signals one — write side for
   the node's sink, read side for proxies — and the proxy factory earns its
   keep as designed: the composition-site lambda gains the output reader; the
@@ -1202,12 +1203,24 @@ Rejected along the way (keep this list — the candidates keep coming back):
 ## Remaining work
 
 1. **`taro tail -f` on polled kinds.** Follow mode rides output events, which
-   polled transports do not carry — it needs a taro-side incremental poll loop
-   (client-side dedup by line ordinal; ``read_output_tail``'s ``after_ordinal``
-   parameter is the reserved server-side optimization). One-shot `taro tail`
-   works remotely today via the proxy's tail read. Decoupled from the lane:
-   chunked/durable backend upload (crash-durable output; pg output storage is
-   the preferred candidate — see point 7) is its own later track.
+   polled transports do not carry — the directory's reconcile loop will
+   synthesize them: for each proxy with a registered output observer
+   (demand-gated — no observer, no fetch), fetch the tail increment
+   (``read_output_tail`` with ``after_ordinal``) and emit
+   `InstanceOutputEvent`s through the proxy hub, with a final increment on
+   eviction inside the tail linger window. Connector-level output relays
+   attach lazily — on the first connector-level output observer, detached
+   with the last, attach-on-admission while demand exists — so env-wide
+   subscribers (patternless `tail -f`) create demand without per-instance
+   bookkeeping; the state/output subscription split (point 3) is the landed
+   prerequisite. Still needed: first/last-observer hooks on
+   `ObservableNotification`, and the post-seed admission announce (instances
+   discovered after the seed poll must emit a lifecycle event at their
+   current stage so patterned `tail -f` can adopt late arrivals). One-shot
+   `taro tail` works remotely today via the proxy's tail read. Decoupled
+   from the lane: chunked/durable backend upload (crash-durable output; pg
+   output storage is the preferred candidate — see point 7) is its own
+   later track.
 2. **Operator lost-run resolution + no-live-node cleanup.** `taro env
    mark-lost` implementing the deferred claim contract (point 8), plus the
    `taro env prune` extension deleting orphan signal/tail rows of
