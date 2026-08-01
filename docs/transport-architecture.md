@@ -1208,7 +1208,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
    (demand-gated — no observer, no fetch), fetch the tail increment
    (``read_output_tail`` with ``after_ordinal``) and emit
    `InstanceOutputEvent`s through the proxy hub, with a final increment on
-   eviction inside the tail linger window. Connector-level output relays
+   eviction inside the tail linger window. The first sync of a proxy
+   baselines at the current max ordinal and emits nothing — no replay;
+   history is pull's job (also keeps the synchronous seed poll inside
+   `open()` event-free, so a subscribed-before-open follower cannot block
+   it). Observers must not block the event lane — `tail -f`'s startup
+   latch queues events until the initial pull is printed, then drains
+   with ordinal dedup. Connector-level output relays
    attach lazily — on the first connector-level output observer, detached
    with the last, attach-on-admission while demand exists — so env-wide
    subscribers (patternless `tail -f`) create demand without per-instance
