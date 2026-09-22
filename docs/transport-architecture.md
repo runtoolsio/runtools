@@ -468,10 +468,11 @@ and is reserved for consumers that genuinely consume it (the unix access
 point's wire dispatcher; a future patternless `tail -f`). All env-wide state
 consumers (dashboard, job screen, selector, `taro live`) use the state
 variant, so merely watching an environment never expresses all-instance
-output demand. Together with the buffer removal above — which deleted the
-last structural output observer — an output subscription is now a truthful
-demand signal, the prerequisite for demand-gated output delivery on polled
-kinds (remaining work 1).
+output demand. Together with the buffer removal above, the only structural
+output observer left on a proxy is the polled directory's own aggregate
+relay — one known object, excluded by identity where demand is read — so
+output subscriptions are a truthful demand signal, the prerequisite for
+demand-gated output delivery on polled kinds (remaining work 1).
 
 `get_output_tail` carries only `max_lines` on the wire (`0` = all retained).
 The `Mode` enum (HEAD/TAIL) was removed from the whole tail chain — HEAD
@@ -1214,13 +1215,18 @@ Rejected along the way (keep this list — the candidates keep coming back):
    `open()` event-free, so a subscribed-before-open follower cannot block
    it). Observers must not block the event lane — `tail -f`'s startup
    latch queues events until the initial pull is printed, then drains
-   with ordinal dedup. Connector-level output relays
-   attach lazily — on the first connector-level output observer, detached
-   with the last, attach-on-admission while demand exists — so env-wide
-   subscribers (patternless `tail -f`) create demand without per-instance
-   bookkeeping; the state/output subscription split (point 3) is the landed
-   prerequisite. Still needed: first/last-observer hooks on
-   `ObservableNotification`, and the post-seed admission announce (instances
+   with ordinal dedup. Demand is computed fresh at each tick, never
+   mirrored through subscription callbacks — the poll is already there, so
+   there is nothing to keep in sync: a proxy has output demand when the
+   directory aggregate has any output observer (env-wide — a patternless
+   `tail -f`; one subscription covers current and future instances), or
+   when the proxy's own output channel has any observer besides the
+   directory's aggregate relay, excluded by identity — the directory knows
+   which relay object it installed. Bindings stay static and full; no
+   subscription state exists to copy onto admissions; demand changes take
+   effect on the next poll. The state/output subscription split (point 3)
+   is the landed prerequisite (a dashboard must not trip the env-wide
+   check). Still needed: the post-seed admission announce (instances
    discovered after the seed poll must emit a lifecycle event at their
    current stage so patterned `tail -f` can adopt late arrivals). One-shot
    `taro tail` works remotely today via the proxy's tail read. Decoupled
