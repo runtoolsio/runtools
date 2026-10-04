@@ -55,9 +55,9 @@ snapshot diff. Applied rows are deleted; orphans swept on a slow cadence.
 **Implemented:** the output lane (point 7) — live tail through a bounded,
 UNLOGGED per-instance tail table in the env db (the node's tail buffer made
 shared); publisher owned by the db access point (registration-time observer
-subscription), pull-only consumer reads via the snapshot proxy. `taro tail -f`
-on polled kinds remains a follow-up: demand-gated event synthesis in the
-polling directory (remaining work 1).
+subscription), independent pull reads and demand-gated output replay through
+the snapshot proxy. Pending output is flushed before terminal state is stored.
+Follow-mode integration and remaining work are described below (remaining work 1).
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -339,9 +339,15 @@ access point carries only wire concerns:
 class InstanceAccessPoint(Protocol):
     def start(self) -> None: ...
     def register_instance(self, job_instance: JobInstance) -> None: ...
+    def finalize_instance(self, job_instance: JobInstance) -> None: ...  # before the terminal write
     def unregister_instance(self, job_instance: JobInstance) -> None: ...
     def close(self) -> None: ...
 ```
+
+`finalize_instance` is a lifecycle step of the exposure role, named for what the node is
+doing rather than how an implementation buffers: settle anything still pending for the
+instance before its terminal state is stored. Postgres publishes the final tail lines with
+their last prune; unix has nothing pending (events are dispatched synchronously).
 
 ### `LockProvider` (node component)
 
@@ -1025,8 +1031,9 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   Two write-cost guards: **one batched flush per node** per cadence (all its
   instances in one statement — txn rate scales with nodes, not instances),
   and **insert only the last `cap` lines of each batch** (anything beyond
-  would be pruned immediately; this bounds per-instance write rate at
-  cap × cadence regardless of output volume — outlier-safe by construction).
+  would be pruned immediately; this bounds each instance's periodic write
+  volume regardless of output rate). Completion performs an additional flush
+  before the terminal snapshot is stored, serialized with periodic flushes.
   Budget check: this lane is *lighter* than the run-state lane (tiny
   WAL-free rows vs whole logged JSONB rewrites at up to 4/s per instance);
   the live set is bounded (~cap × line size per instance), so vacuum churn
@@ -1043,7 +1050,7 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
 - **Wiring:** a narrow facet pair split like the signals one — write side for
   the node's sink, read side for proxies — and the proxy factory earns its
   keep as designed: the composition-site lambda gains the output reader; the
-  directory is untouched.
+  polling directory drives output synchronization only while demand exists.
 - **Lifecycle:** rows removed by a *delayed* sweep after the run ends, not
   synchronously at `_finalize_run` — delete-at-finalize could race an
   in-flight tail read; the grace period also leaves room for a later polled
@@ -1204,31 +1211,61 @@ Rejected along the way (keep this list — the candidates keep coming back):
 ## Remaining work
 
 1. **`taro tail -f` on polled kinds.** Follow mode rides output events, which
-   polled transports do not carry — the directory's reconcile loop will
-   synthesize them: for each proxy with a registered output observer
+   polled transports do not carry directly — the directory's reconcile loop
+   synthesizes them: for each proxy with a registered output observer
    (demand-gated — no observer, no fetch), fetch the tail increment
    (``read_output_tail`` with ``after_ordinal``) and emit
    `InstanceOutputEvent`s through the proxy hub, with a final increment on
-   eviction inside the tail linger window. The first sync of a proxy
-   baselines at the current max ordinal and emits nothing — no replay;
-   history is pull's job (also keeps the synchronous seed poll inside
-   `open()` event-free, so a subscribed-before-open follower cannot block
-   it). Observers must not block the event lane — `tail -f`'s startup
-   latch queues events until the initial pull is printed, then drains
-   with ordinal dedup. Demand is computed fresh at each tick, never
+   eviction inside the tail linger window. Each proxy keeps one output cursor,
+   initially zero, for its entire lifetime. The first demanded sync replays the
+   retained tail, and later syncs catch up across pauses in demand. Pull reads
+   are independent and never change the stream cursor; consumers deduplicate
+   overlapping lines by ordinal. This deliberately allows bounded replay and
+   removes baseline initialization, resets, and subscription handoff locking.
+   The cursor relies on publication in ordinal order: the node's output
+   pipeline serializes ordinal assignment, processing and dispatch, so a
+   producer thread (stdout vs stderr reader) can never be overtaken by a
+   higher ordinal and skipped. The capture log handler forwards without taking
+   the stdlib handler lock — its `emit()` keeps no state and the pipeline
+   serializes publication — so the publish lock is the only lock on the logging
+   path and no lock cycle can form with a thread logging concurrently.
+
+   The publisher serializes periodic and completion flushes. Before recording
+   completion, the node calls the access point's `finalize_instance`, which on
+   postgres flushes pending output (with the instance's last prune). If the flush
+   fails, it logs the error and still records completion: a failure to update
+   the tail cache must not prevent the job's history from being saved. Pending
+   lines are retried on subsequent periodic flushes.
+
+   When a follower observes completion, it reads any remaining tail lines and
+   removes the proxy. If a retry writes more lines after that final read, the
+   follower will not receive them as events. Those lines remain available to
+   subsequent tail reads until cleanup removes them. This possible loss is
+   accepted for the best-effort live tail; complete output is stored separately
+   by the configured output backends. The linger window keeps tail rows
+   readable briefly after completion, but cannot guarantee delivery of lines
+   written after a follower's final read.
+
+   Observers must not block startup event delivery: `tail -f` queues output
+   during the initial pull, then drains it with ordinal dedup. The command's
+   main thread waits for an explicit stop event, independent of transport
+   thread lifetime. SIGINT/SIGTERM set that event; command cleanup closes
+   the connector. Demand is computed fresh at each tick, never
    mirrored through subscription callbacks — the poll is already there, so
    there is nothing to keep in sync: a proxy has output demand when the
-   directory aggregate has any output observer (env-wide — a patternless
-   `tail -f`; one subscription covers current and future instances), or
+   directory aggregate has any output observer (env-wide — `tail -f` filters
+   patterns on the client; one subscription covers current and future instances), or
    when the proxy's own output channel has any observer besides the
    directory's aggregate relay, excluded by identity — the directory knows
    which relay object it installed. Bindings stay static and full; no
    subscription state exists to copy onto admissions; demand changes take
    effect on the next poll. The state/output subscription split (point 3)
    is the landed prerequisite (a dashboard must not trip the env-wide
-   check). Still needed: the post-seed admission announce (instances
-   discovered after the seed poll must emit a lifecycle event at their
-   current stage so patterned `tail -f` can adopt late arrivals). One-shot
+   check). Still needed: the post-seed admission announce for state-event
+   consumers such as `taro listen`, which otherwise hear nothing about a newly
+   discovered instance until a later lifecycle transition. Patterned `tail -f`
+   already receives late arrivals through its environment-wide output subscription,
+   including their retained tail, and filters them on the client. One-shot
    `taro tail` works remotely today via the proxy's tail read. Decoupled
    from the lane: chunked/durable backend upload (crash-durable output; pg
    output storage is the preferred candidate — see point 7) is its own
