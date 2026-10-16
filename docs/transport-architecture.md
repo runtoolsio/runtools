@@ -1158,8 +1158,8 @@ def claim_lost_runs(stale_after: float) -> list[InstanceID]:
   cross-clock approximation bounded by skew — same reasoning that makes
   heartbeat *ages* server-computed.
 - Prerequisite: **all terminal writes become conditional** (`ended IS NULL`) —
-  today's normal finalizer is unconditional, so first-writer-wins does not yet
-  hold in either direction. Required the day any second terminal writer exists.
+  first-writer-wins in either direction, so a recovering owner cannot overwrite
+  an operator's resolution (remaining work 2, unit A).
 
 ## Kept decisions
 
@@ -1274,9 +1274,28 @@ Rejected along the way (keep this list — the candidates keep coming back):
    from the lane: chunked/durable backend upload (crash-durable output; pg
    output storage is the preferred candidate — see point 7) is its own
    later track.
-2. **Operator lost-run resolution + no-live-node cleanup.** `taro env
-   mark-lost` implementing the deferred claim contract (point 8), plus the
-   `taro env prune` extension deleting orphan signal/tail rows of
+2. **Lost-run resolution — three self-contained units, in order A → B → C.**
+   B and C each depend only on A.
+   - **A. Conditional terminal writes.** `store_runs` writes only rows with
+     `ended IS NULL` — the first terminal write wins, in every direction. It
+     reports refused rows (already terminal) apart from missing init rows;
+     the node logs a refusal as *already finalized* — the stored result may
+     be its own earlier successful write, so it is not framed as a conflict.
+     The prerequisite for any second terminal writer (point 8).
+   - **B. Terminal-write retry.** A failed final `store_runs` keeps the
+     terminal snapshot pending on the node's flush thread, retried each tick
+     through A's conditional write. Pending runs **keep heartbeating** — a
+     run whose owner is alive and retrying is not lost, so consumers must not
+     show it as LOST during a transient storage outage. If an operator claim
+     wins anyway, A settles it (the retry is refused as already finalized).
+     Node close makes one last attempt; a run still pending then becomes
+     LOST and is left to the operator.
+   - **C. `taro env mark-lost`.** Implements the deferred claim contract
+     (point 8), including the new `TerminationStatus.LOST` (→
+     `Outcome.FAULT`): list the lost candidates matching the patterns,
+     confirm, claim atomically with staleness proven at write time.
+
+   Then the `taro env prune` extension deleting orphan signal/tail rows of
    ended-or-missing instances — the env-without-nodes gap stays an accepted
    operator-maintenance matter (operator commands may mutate; the observation
    lane never does).
