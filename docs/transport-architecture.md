@@ -1276,13 +1276,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
    later track.
 2. **Lost-run resolution — three self-contained units, in order A → B → C.**
    B and C each depend only on A.
-   - **A. Conditional terminal writes.** `store_runs` writes only rows with
+   - **A. Conditional terminal writes (done).** `store_runs` writes only rows with
      `ended IS NULL` — the first terminal write wins, in every direction. It
      reports refused rows (already terminal) apart from missing init rows;
      the node logs a refusal as *already finalized* — the stored result may
      be its own earlier successful write, so it is not framed as a conflict.
      The prerequisite for any second terminal writer (point 8).
-   - **B. Terminal-write retry.** A failed final `store_runs` keeps the
+   - **B. Terminal-write retry (done).** A failed final `store_runs` keeps the
      terminal snapshot pending on the node's flush thread, retried each tick
      through A's conditional write. Pending runs **keep heartbeating** — a
      run whose owner is alive and retrying is not lost, so consumers must not
