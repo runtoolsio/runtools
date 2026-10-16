@@ -1121,7 +1121,9 @@ An automatic LOST-terminalizer was designed in full and rejected:
   any threshold discards that recoverable truth permanently (first-writer-wins
   cuts both ways).
 - **The sweeps don't need it.** Signals and output tails already converge via
-  heartbeat attestation without terminalizing the run — liveness-based cleanup
+  heartbeat attestation (`RunStorage.live_instances` — non-ended rows with
+  a fresh heartbeat, init-only rows included, since a fresh run's first tail
+  lines can precede its first snapshot) without terminalizing the run — liveness-based cleanup
   of *transport artifacts* (re-sendable commands, expendable cache rows) is a
   categorically smaller claim than fabricating a run's terminal history.
 - **What remained on the reaper's side was cosmetic**: active-scan tidiness
@@ -1261,11 +1263,13 @@ Rejected along the way (keep this list — the candidates keep coming back):
    subscription state exists to copy onto admissions; demand changes take
    effect on the next poll. The state/output subscription split (point 3)
    is the landed prerequisite (a dashboard must not trip the env-wide
-   check). Still needed: the post-seed admission announce for state-event
-   consumers such as `taro listen`, which otherwise hear nothing about a newly
-   discovered instance until a later lifecycle transition. Patterned `tail -f`
-   already receives late arrivals through its environment-wide output subscription,
-   including their retained tail, and filters them on the client. One-shot
+   check). Instances discovered after the seed poll are announced once
+   bound: a lifecycle event at their current stage with its real timestamp,
+   so state-event consumers such as `taro listen` learn of runs that
+   appeared mid-life. The seed itself stays silent — even an empty one — it
+   establishes the view and is not news. Patterned `tail -f` receives late
+   arrivals through its environment-wide output subscription, including their
+   retained tail, and filters them on the client. One-shot
    `taro tail` works remotely today via the proxy's tail read. Decoupled
    from the lane: chunked/durable backend upload (crash-durable output; pg
    output storage is the preferred candidate — see point 7) is its own
@@ -1278,11 +1282,12 @@ Rejected along the way (keep this list — the candidates keep coming back):
    lane never does).
 3. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
-4. Decide `read_instance_ids` (`RunStorage`): its production caller vanished
-   when the orphan sweep switched to heartbeat attestation — keep as a generic
-   identity-projection primitive or drop it.
 
-Done since the last revision: liveness surfaced to consumers end-to-end (the
+Done since the last revision: the output lane closed end to end —
+demand-gated output replay on polled kinds, ordered publication,
+`finalize_instance`, non-blocking `tail -f`, post-seed admission announce,
+and init-row-inclusive sweep attestation (`live_instances` replaced the
+callerless `read_instance_ids`). Earlier: liveness surfaced to consumers end-to-end (the
 lost-run answer, point 8) — `InstanceLiveness` on the `JobInstance` surface
 (default presumed-live; snapshot proxies carry the polling directory's
 verdict); rendered everywhere actives appear: `taro ps`, the dashboard and
