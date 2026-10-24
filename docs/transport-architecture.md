@@ -60,7 +60,7 @@ the snapshot proxy. Pending output is flushed before terminal state is stored.
 Follow mode on polled kinds is implemented (point 7, "Follow mode on polled kinds").
 **Implemented:** lost-run resolution (point 8) — `JobRun.is_lost()`, the
 operator's `taro env mark-lost`, and `taro env clean` for orphan transport rows.
-**Open:** split the `JobInstance` contract (deferred until it bites).
+**Implemented:** the `JobInstance` contract split (point 1) — `run()` is producer-side only.
 
 ## Mental model
 
@@ -373,20 +373,21 @@ operation's duration**; the `Lock` contract grows a no-wait acquire accordingly.
 Point 2 is designed; points 1 and 3 still have open details to settle before
 the sweep.
 
-### 1. Split the `JobInstance` contract
+### 1. Split the `JobInstance` contract — implemented
 
-`JobInstance` becomes the wire contract, and today it doesn't qualify: the
-current proxy stubs `run()` with `pass` and raises on `tracking` — a Liskov
-violation the redesign would make load-bearing. Split:
+`JobInstance` is the consumer (wire) contract, and proxies must implement it
+fully — no stubbed or raising members. `tracking` had already left the
+surface; the last violation was `run()`, which every proxy implemented as
+`raise NotImplementedError("Remote run is not supported")`. Split:
 
-- **`JobInstance`** (consumer contract; proxies implement it fully):
-  `metadata`, `id`, `snap()`, `output`, `stop()`, `find_phase_control()`,
-  `notifications`.
-- **Producer-side extension** (name TBD — `RunnableInstance`?): adds `run()`
-  and `tracking`. Declared in `runcore.job`, implemented in `runjob`.
-
-Open: extension name; whether `tracking` later moves to the consumer surface
-(remote tracking support).
+- **`JobInstance`** (runcore, consumer contract): `metadata`, `id`, `snap()`,
+  `output`, `stop()`, `find_phase_control()`, `notifications` — no `run()`.
+  `JobInstanceDelegate` mirrors it.
+- **Running is producer-side** (runjob): the concrete instance
+  (`instance.create` → `_JobInstance`) and the node's `JobInstanceManaged`
+  own `run()`; callers that run instances already hold those types (the
+  node, runcli via `create_instance`). No separate runcore extension type —
+  nothing consumer-side needs to name "a runnable instance".
 
 ### 2. Event ownership and startup consistency — designed
 
@@ -1343,9 +1344,7 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. Resolve the `JobInstance` contract split when it bites (open point 1;
-   remote-run question).
-2. Crash-durable output storage — chunked/durable backend upload so a
+1. Crash-durable output storage — chunked/durable backend upload so a
    crashed node's output survives beyond the bounded tail (pg output storage
    is the preferred candidate, point 7). Parked.
 
