@@ -1218,8 +1218,8 @@ def mark_lost_runs(instance_ids, stale_after: float) -> list[InstanceID]:
   the last heartbeat, or node clock skew) — which would otherwise suppress
   the ENDED(LOST) replay.
 - **Init-only rows** have no document and cannot be marked; they stay
-  unresolved. Removing them is out of scope (the planned prune extension
-  deletes signal/tail rows, not run rows).
+  unresolved. Removing them is out of scope (`taro env clean` deletes
+  signal/tail rows, not run rows).
 - **Placement:** an `env` maintenance command, not a `stop` mode — `stop`
   asks the owner to finish; `mark-lost` writes the outcome for a run with no
   owner. It shares `stop`'s look (patterns, preview table, confirm, `-f`), and
@@ -1341,8 +1341,9 @@ Rejected along the way (keep this list — the candidates keep coming back):
    from the lane: chunked/durable backend upload (crash-durable output; pg
    output storage is the preferred candidate — see point 7) is its own
    later track.
-2. **Lost-run resolution — self-contained units, in order A → B → C1 → C2.**
-   B and C1 each depend only on A; C2 builds on C1.
+2. **Lost-run resolution — self-contained units, in order
+   A → B → C1 → C2 → D.** B and C1 each depend only on A; C2 builds on C1;
+   D needs only storage primitives.
    - **A. Conditional terminal writes (done).** `store_runs` writes only rows with
      `ended IS NULL` — the first terminal write wins, in every direction. It
      reports refused rows (already terminal) apart from missing init rows;
@@ -1370,10 +1371,28 @@ Rejected along the way (keep this list — the candidates keep coming back):
      (`open_env_db`), not through the connector; `taro stop` on a lost
      instance points to it.
 
-   Then the `taro env prune` extension deleting orphan signal/tail rows of
-   ended-or-missing instances — the env-without-nodes gap stays an accepted
-   operator-maintenance matter (operator commands may mutate; the observation
-   lane never does).
+   - **D. `taro env clean`: orphan transport rows (done).** Node sweeps
+     only run on live nodes, so an environment whose last node is gone keeps
+     its signal and output-tail rows. `clean` — already "remove state left by
+     dead processes" (component dirs, local kind) — removes them on every
+     kind; `prune` stays history retention. Contract:
+     - **Lifecycle, not liveness.** A row is an orphan when its run has
+       ended or has no row at all (`RunStorage.read_run_ends`: identities
+       plus the `ended` column, init-only rows included as non-ended — no
+       snapshots loaded). The node sweep's policy stays separate (heartbeat
+       freshness); only storage primitives are shared.
+     - **Lost runs are untouched** — still non-ended — until `mark-lost`
+       resolves them; ended or missing runs are cleanable immediately,
+       subject to the tail linger (`TAIL_LINGER_AFTER_END`, 10s after
+       `ended`). `clean` removes signal and tail rows, never run history.
+     - **Preview and confirm.** Counts of signal rows and instance tails;
+       `-f` skips the prompt. The previewed rows are deleted without a
+       recheck: ended stays ended, a deleted run row stays deleted, and the
+       linger only expires. The one exception — a pruned ID re-run under a
+       reused ordinal while the prompt waits — is an accepted limitation
+       (ops are re-sendable, the tail is a cache). Rows orphaned while the
+       prompt waits are left to the next run.
+     - Operator commands may mutate; the observation lane never does.
 3. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
 
