@@ -1141,12 +1141,12 @@ class JobRun:
   older snapshot re-read the heartbeat from the instance at paint time.
 - **Reader clock (accepted limitation).** `is_lost` compares against the
   reader's clock. Skew between reader and storage can cause false or delayed
-  LOST badges; the operator claim (`claim_lost_runs`) evaluates staleness on
+  LOST badges; the operator's mark (`mark_lost_runs`) evaluates staleness on
   the storage clock and remains authoritative. The orphan sweeps'
   `live_instances` likewise stays on the storage clock and needs proof of life
   (`NULL` heartbeat → not live) — the opposite default to `is_lost`, which is
   why there is no `is_alive`.
-- **Storage read independent of discovery.** `EnvironmentConnector.read_active_runs`
+- **Storage read independent of discovery.** `RunStorage.read_active_runs`
   returns persisted non-ended snapshots (lost ones included, init-only rows
   excluded) on every kind — the local kind's live view drops a dead node's
   runs, storage does not.
@@ -1173,33 +1173,60 @@ An automatic LOST-terminalizer was designed in full and rejected:
 **Principle:** *observation never mutates; resolving an unknown state is a
 deliberate act* — an operator's, not a clock's.
 
-**Deferred, designed: the operator claim (`taro env mark-lost`).** When an
-operator resolves a lost run deliberately, the write must still be race-safe
-against a recovering owner. The designed contract, kept for that day:
+**The operator mark (`taro env mark-lost`).** An operator resolves lost runs
+deliberately; the write must still be race-safe against a recovering owner:
 
 ```python
-def claim_lost_runs(stale_after: float) -> list[InstanceID]:
-    # One atomic claim: staleness proven at write time on the storage clock
-    # (candidate discovery cannot be trusted — the owner may attest between
-    # read and write), ended IS NULL, run IS NOT NULL (init-only rows have no
-    # document to terminalize). Transforms the stored document into a
-    # structurally terminal root phase so eviction replays ENDED(LOST).
-    # Implementation freedom: SELECT ... FOR UPDATE + Python-side stamp inside
-    # one transaction beats SQL document surgery (single serializer).
+def mark_lost_runs(instance_ids, stale_after: float) -> list[InstanceID]:
+    # Marks only the given instances — the candidates the operator confirmed,
+    # never runs they did not see. One atomic write: staleness proven at write
+    # time on the storage clock (the listing cannot be trusted — the owner may
+    # attest between read and write), ended IS NULL, run IS NOT NULL. The stored
+    # document becomes terminal (root and every unfinished phase end LOST), so
+    # eviction replays ENDED(LOST). Returns the instances actually marked.
+    # SELECT ... FOR UPDATE (postgres) / BEGIN IMMEDIATE (sqlite) + Python-side
+    # stamp inside one transaction — a single serializer, no SQL document surgery.
 ```
 
-- New `TerminationStatus.LOST` mapped to `Outcome.FAULT` (UNKNOWN stays
-  reserved for unrecognized persisted codes); `terminated_at =
-  LEAST(GREATEST(heartbeat_at, started), storage_now)` — the last
-  provably-alive moment, floored against negative execution time and capped so
-  the claim never writes a timestamp in the storage clock's future (`started`
-  is node-clock domain data, so a skewed-ahead node would otherwise leak a
-  future timestamp through the floor). A lost run's duration is inherently a
-  cross-clock approximation bounded by skew — same reasoning that keeps the
-  claim's staleness check on the storage clock.
-- Prerequisite: **all terminal writes become conditional** (`ended IS NULL`) —
-  first-writer-wins in either direction, so a recovering owner cannot overwrite
-  an operator's resolution (remaining work 2, unit A).
+- **Candidates.** `read_active_runs(match)` filtered by `JobRun.is_lost()` —
+  read from storage, so a dead node's runs are found on every kind (socket
+  kinds' live view drops them). The reader-clock verdict only selects; the
+  mark decides on the storage clock.
+- **Storage, not the connector.** `mark-lost` opens the environment's store
+  directly (`env.open_env_db`, like `taro env`'s config commands): the
+  operation is storage-only operator maintenance and needs no live view, so
+  the connector — the app-facing monitoring/control surface — carries
+  neither method.
+- **First writer wins, both ways.** A heartbeat committed before the mark
+  prevents it — the run is skipped and reported as no longer lost. A mark
+  committed first makes the owner's own terminal write refused (logged
+  *already finalized*); its heartbeats and active-state writes no longer apply
+  to the ended row. An owner still running when the mark lands carries on
+  while its row says LOST — the operator's deliberate call, guarded by the
+  preview and confirmation.
+- **`TerminationStatus.LOST`** mapped to `Outcome.FAULT` (UNKNOWN stays
+  reserved for unrecognized persisted codes).
+- **`terminated_at` is an estimate** — the last provably-alive moment: the
+  later of `heartbeat_at` and `started`, capped at the storage clock's now
+  (`started` is node-clock data, so a skewed-ahead node could otherwise leak a
+  future timestamp through the floor). A run that never started (`started` is
+  None) ends at its last heartbeat with no start time. A lost run's duration
+  is a cross-clock approximation bounded by skew.
+- **Ended beats non-ended.** `JobRun.is_newer_than` treats an ended snapshot
+  as newer than any non-ended one: lifecycle is monotonic, and an estimated
+  `terminated_at` may predate the last active snapshot (a state change after
+  the last heartbeat, or node clock skew) — which would otherwise suppress
+  the ENDED(LOST) replay.
+- **Init-only rows** have no document and cannot be marked; they stay
+  unresolved. Removing them is out of scope (the planned prune extension
+  deletes signal/tail rows, not run rows).
+- **Placement:** an `env` maintenance command, not a `stop` mode — `stop`
+  asks the owner to finish; `mark-lost` writes the outcome for a run with no
+  owner. It shares `stop`'s look (patterns, preview table, confirm, `-f`), and
+  `stop` on a lost instance prints a hint pointing to it instead of sending a
+  signal nobody reads.
+- Prerequisite: **all terminal writes conditional** (`ended IS NULL`,
+  remaining work 2, unit A).
 
 ## Kept decisions
 
@@ -1326,7 +1353,7 @@ Rejected along the way (keep this list — the candidates keep coming back):
      terminal snapshot pending on the node's flush thread, retried each tick
      through A's conditional write. Pending runs **keep heartbeating** — a
      run whose owner is alive and retrying is not lost, so consumers must not
-     show it as LOST during a transient storage outage. If an operator claim
+     show it as LOST during a transient storage outage. If an operator mark
      wins anyway, A settles it (the retry is refused as already finalized).
      Node close makes one last attempt; a run still pending then becomes
      LOST and is left to the operator.
@@ -1334,12 +1361,14 @@ Rejected along the way (keep this list — the candidates keep coming back):
      (point 8, "Liveness on the run") replace `InstanceLiveness`,
      `JobInstance.liveness`, `update_liveness` and taro's
      `ActiveInstanceRow`; `RunHead` carries `heartbeat_at` instead of a
-     server-computed age; the connector gains `read_active_runs`.
-   - **C2. `taro env mark-lost`.** Implements the deferred claim contract
-     (point 8), including the new `TerminationStatus.LOST` (→
-     `Outcome.FAULT`): candidates are `read_active_runs(match)` filtered by
-     `is_lost()`, confirmed, then claimed atomically with staleness proven at
-     write time.
+     server-computed age.
+   - **C2. `taro env mark-lost` (done).** The operator mark (point 8),
+     including the new `TerminationStatus.LOST` (→ `Outcome.FAULT`):
+     candidates are `read_active_runs(match)` filtered by `is_lost()`,
+     confirmed, then only the confirmed instances marked atomically with
+     staleness proven at write time — straight against storage
+     (`open_env_db`), not through the connector; `taro stop` on a lost
+     instance points to it.
 
    Then the `taro env prune` extension deleting orphan signal/tail rows of
    ended-or-missing instances — the env-without-nodes gap stays an accepted
