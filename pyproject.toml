@@ -11,17 +11,18 @@ classifiers = ["License :: OSI Approved :: MIT License"]
 requires-python = ">=3.12"
 dynamic = ["version", "description"]
 dependencies = [
-    "runtoolsio-runcore>=0.1,<0.2",
-    "runtoolsio-runjob>=0.1,<0.2",
-    "runtoolsio-runcli>=0.1,<0.2",
-    "runtoolsio-taro>=0.1,<0.2",
+    "runtoolsio-runcore>=0.3.0b1,<0.4",
+    "runtoolsio-runjob>=0.3.0b1,<0.4",
+    "runtoolsio-runcli>=0.3.0b1,<0.4",
+    "runtoolsio-taro>=0.3.0b1,<0.4",
 ]
 
 [project.optional-dependencies]
-cli = ["runtoolsio-runcli>=0.1,<0.2"]
-ops = ["runtoolsio-taro>=0.1,<0.2"]
-core = ["runtoolsio-runcore>=0.1,<0.2"]
-job = ["runtoolsio-runjob>=0.1,<0.2"]
+cli = ["runtoolsio-runcli>=0.3.0b1,<0.4"]
+ops = ["runtoolsio-taro>=0.3.0b1,<0.4"]
+core = ["runtoolsio-runcore>=0.3.0b1,<0.4"]
+job = ["runtoolsio-runjob>=0.3.0b1,<0.4"]
+postgres = ["runtoolsio-runcore[postgres]>=0.3.0b1,<0.4"]
 
 [project.scripts]
 run = "runtools.runcli:main_cli"

@@ -2,6 +2,9 @@
 
 Lightweight job coordination, monitoring, and history for scripts and programs.
 
+> **Beta (0.3.0b1).** APIs and CLIs are stabilizing. A beta release may change the database schema without a
+> migration — the environment must then be recreated, losing its history; such releases say so.
+
 Wrap any program with mutual exclusion, queuing, approvals, and observability — without deploying
 a full orchestration platform. No framework lock-in, no base classes to inherit, no decorators required.
 
@@ -19,6 +22,10 @@ taro history
 
 # Stop a running job
 taro stop my-task
+
+# Resolve runs whose node crashed (shown as LOST), then clean up after them
+taro env mark-lost
+taro env clean
 ```
 
 ## Installation
@@ -34,6 +41,7 @@ pip install runtoolsio[cli]   # Job wrapper CLI only (runcli + runjob + runcore)
 pip install runtoolsio[ops]   # Ops CLI only (taro + runcore)
 pip install runtoolsio[core]  # Core library only
 pip install runtoolsio[job]   # Execution library only (runjob + runcore)
+pip install runtoolsio[postgres]  # Add the PostgreSQL driver for `postgres` environments
 ```
 
 ## Packages
@@ -42,7 +50,7 @@ pip install runtoolsio[job]   # Execution library only (runjob + runcore)
 |---------|-------------|------------|
 | [**runcore**](https://github.com/runtoolsio/runcore) | Contracts/protocols, monitoring/control, SQLite persistence | — |
 | [**runjob**](https://github.com/runtoolsio/runjob) | Execution machinery (phases, instances, nodes) | runcore |
-| [**taro**](https://github.com/runtoolsio/taro) | Ops CLI (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `stats`) | runcore |
+| [**taro**](https://github.com/runtoolsio/taro) | Ops CLI (`ps`, `history`, `listen`, `stop`, `wait`, `approve`, `resume`, `tail`, `dash`, `env`) | runcore |
 | [**runcli**](https://github.com/runtoolsio/runcli) | Job wrapper CLI — wraps any program with coordination, monitoring, and history | runjob |
 
 ## How It Works
@@ -51,9 +59,9 @@ Jobs run inside **environments**. Jobs in the same environment can coordinate wi
 (mutual exclusion, queuing, dependencies). Each environment is implemented by a **node** that
 manages instances, coordinates jobs, and dispatches events:
 
-- **In-process** (`InProcessNode`) — direct in-memory callbacks, for embedding in applications
-- **Local** (`LocalNode`) — Unix domain sockets, for jobs on the same machine
-- **Distributed** (planned) — Redis, for jobs across machines
+- **`local`** — SQLite + Unix domain sockets, for jobs on the same machine (the default)
+- **`postgres`** — PostgreSQL + database polling, for jobs across machines
+- **In-process** — direct in-memory callbacks, for tests and embedding in applications
 
 ### Coordination Phases
 

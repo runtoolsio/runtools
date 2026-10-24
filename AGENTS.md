@@ -47,6 +47,7 @@ Each subproject has its own virtual environment under `<package>/venv/`. Run tes
 runcore/venv/bin/python -m pytest runcore/test/ -v
 runjob/venv/bin/python -m pytest runjob/test/ -v
 taro/venv/bin/python -m pytest taro/test/ -v
+runcli/venv/bin/python -m pytest runcli/test/ -v
 ```
 
 ## Coding Standards
@@ -88,13 +89,19 @@ Technical/design answers must be clear, well-structured, and professional — op
 
 ## Project Stage
 
-Pre-beta — backward compatibility is not required.
+Beta (from 0.3.0b1). Compatibility policy:
+
+- **Database schema:** may change without a migration; bump the schema version and say in the release notes that
+  environments must be recreated (history is lost). Migrations arrive with 1.0.
+- **Public API and CLI:** avoid gratuitous breaking changes; when one is needed, make it cleanly (no shims) and
+  note it in the release notes.
 
 Review rule:
 
 - When reviewing changes, do not raise findings only about preserving compatibility with old registry/config
   files, old public symbols, old schemas, or gradual upgrade paths unless the task explicitly says migration,
-  upgrade compatibility, or phased rollout is in scope.
+  upgrade compatibility, or phased rollout is in scope. Do flag a breaking public API/CLI change that is not
+  called out for the release notes.
 - Treat compatibility shims as extra complexity by default. Prefer judging whether the new model is internally
   correct, cleanly wired, well tested, and consistent across the current workspace.
 

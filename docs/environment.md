@@ -113,6 +113,13 @@ at load — the config itself stores neither `id` nor `kind`. All config models 
 | `retention.keep_days`             | all   | Default retention for `env prune`: keep finished runs newer than N days            | none                 |
 | `plugins`                         | all   | Plugin name → config mapping                                                       | empty                |
 
+### Schema compatibility (beta)
+
+Each database records its schema version. During the beta, a release may change the schema without a migration:
+opening an older database then fails with `IncompatibleSchemaError`, and the environment must be recreated
+(`taro env delete`, then create it again) — its run history is lost. Such releases say so
+in their notes. Migrations arrive with 1.0.
+
 ### Save semantics
 
 `save_env_config()` performs a **full replace** (DELETE all + INSERT non-defaults). Reverting a setting to its default
@@ -175,14 +182,13 @@ written to the database and applied by the owning node within its poll interval 
 operation is recorded in the run's history (`control_requests`). A pending command does not outlive its
 target — runs die with their node, so a command posted around an owning-node crash is never applied (the
 run is reported lost, see below, and the pending command is eventually swept from the mailbox). Crashed nodes are
-detected via heartbeats: a run whose node stops attesting liveness is reported as lost by consumers (never
-auto-terminated). The environment `location` must be a direct DSN (session advisory locks are incompatible
+detected via heartbeats: a run whose node stops attesting liveness for 45 s is reported as lost by consumers (never
+auto-terminated) — see [Resolving lost runs](#resolving-lost-runs). The environment `location` must be a direct DSN (session advisory locks are incompatible
 with transaction-mode poolers). Live output of another node's instances is readable as a bounded
 tail (roughly the newest `tail_cap` lines — the cap is amortized, so briefly up to about twice
 that may be retained between prune cycles; roughly 1–2 s behind live; `tail_cap: 0` disables
 tail publishing); complete output is available from the configured output storages once the run ends.
-Follow-style tailing (`taro tail -f`) is not live on this kind yet — it currently rides output
-events, which polled transports do not carry.
+Follow-style tailing (`taro tail -f`) works: output is polled from the tail only while someone follows it.
 
 ### In-process (not a kind)
 
@@ -243,12 +249,34 @@ taro env delete staging -f              # skip confirmation
 
 Deletes the DB file and removes the registry entry. The built-in local cannot be deleted.
 
+### Resolving lost runs
+
+A run whose node stopped heartbeating (crash, `kill -9`, lost network) is **lost**: still unfinished in the
+database, but nobody is attesting it. Lost runs are never resolved automatically — a partitioned node may recover and
+finish the run truthfully. They stay listed everywhere (`taro ps`, dashboards) with a `LOST <age>` badge and a dimmed
+row, and `taro stop` on a lost run points here instead of sending a command nobody would apply.
+
+```bash
+taro env mark-lost                      # preview all lost runs, confirm, mark them LOST
+taro env mark-lost "backup@*" -e prod   # only matching runs
+taro env mark-lost -f                   # skip confirmation
+```
+
+Marking writes the terminal status `LOST` (outcome: fault) with the last heartbeat as an estimated end time. It is
+race-safe: a run whose node attests again before the mark is skipped, and a node that recovers after the mark cannot
+overwrite it. Lost runs are found from the database, so this works on every kind — on `local`, a dead node's runs
+are not visible in the live view at all.
+
 ### Cleaning stale transport state
 
 ```bash
-taro env clean                          # remove dead process socket dirs
-taro env clean -e dev
+taro env clean                          # stale socket dirs + orphan signal/tail rows
+taro env clean -e dev -f                # skip confirmation
 ```
+
+Removes state left behind by dead processes: stale component directories (`local` kind) and the pending-command and
+output-tail rows of runs that have ended or no longer exist. Rows of lost runs are kept until `mark-lost` resolves
+them; run history is never touched.
 
 ### Pruning run history
 
