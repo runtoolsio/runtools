@@ -18,7 +18,7 @@ tombstones), the unix-socket directory/discovery/proxy, the slim `_Connector`,
 and the access-point renames. **The persistence write+read path (design point 4):**
 `RunStatePersister` (coalesced flush), `read_active_runs` +
 `DbInstanceDiscovery`, the `updated_at` + `state_updated_at` columns with the
-newer-wins guard, `active_run_versions()`, and the poll directory itself
+newer-wins guard, `active_run_heads()`, and the poll directory itself
 (`PollingInstanceDirectory` + `SnapshotJobInstanceProxy` + snapshot-diff
 synthesis) — all across both storage backends (PostgreSQL alongside SQLite,
 sharing `runcore/db/sql.py`). **The backend-kind slice:** environments are
@@ -43,8 +43,8 @@ connector is gone — it duplicated the node's own db/store references and
 muddled close ownership); node live reads merge own instances over the
 directory view.
 **Implemented:** heartbeat/liveness (point 4) — nodes touch `heartbeat_at` on
-the flush thread; readers get server-clock heartbeat *ages* through the version
-scan and mark stale proxies lost (interpret-never-mutate).
+the flush thread; runs carry `heartbeat_at` read from storage and answer
+`JobRun.is_lost()` themselves (interpret-never-mutate).
 **Implemented:** signals-as-state (point 5) — remote `stop` and phase control
 work on the `postgres` kind: consumer proxies write mailbox rows, the node's
 signal reconciler (`PostgresInstanceAccessPoint`, coarse poll) applies them at
@@ -568,9 +568,9 @@ Timestamps:
   `updated_at` is the *re-read* cursor (two roles, see the poll section).
 - **`heartbeat_at`** (column, **implemented**) — liveness attestation, touched by the
   node on a slow cadence (below). Written in the *storage's* clock (postgres:
-  `now()`), and read back only as a server-computed **age** on the version scan —
-  one clock measures both edges, so node/consumer skew cancels and consumers never
-  parse or compare liveness timestamps. Never a change-detection cursor and never
+  `now()`), read back onto `JobRun.heartbeat_at` (storage metadata, not part of
+  the run document) and compared by readers against their own clock (see
+  "Liveness on the run", point 8). Never a change-detection cursor and never
   bumps `updated_at` (a heartbeat must not trigger consumer deep reads).
 
 Calibration: coalescing makes writes/sec ≈ active-changing-instances × (1/flush)
@@ -581,7 +581,7 @@ that breaks small DBs; that is why coalescing is a rule, not an optimisation.
 
 **PostgreSQL read side: poll, not event replay.** The PostgreSQL backend does
 not subscribe to lifecycle/phase/status events. On open and every poll tick, the
-directory reads a cheap active-run version cursor, deep-reads only changed rows,
+directory reads cheap active-run heads (change cursor + heartbeat), deep-reads only changed rows,
 updates `SnapshotJobInstanceProxy` objects under `is_newer_than`, and evicts ids
 absent from the complete active scan. A `get_instance` miss means the instance
 is not in the current live view — no read-path fault-in. The poll is the
@@ -599,10 +599,10 @@ an instance whose node dies without emitting `ENDED` can remain in the view.
 on the node's flush thread every `HEARTBEAT_INTERVAL` (15s; retry-fast on the
 250ms tick after a failed touch) — deliberately the *same thread* as the flush,
 so the heartbeat attests exactly the lane consumers depend on (a wedged flush
-thread reads as lost, never alive-but-frozen). The version scan returns a
-server-computed `heartbeat_age`; `PollingInstanceDirectory` marks a proxy lost
-past 3× the interval (logged once on the transition), and
-`SnapshotJobInstanceProxy` exposes `heartbeat_age`/`is_lost`. Readers
+thread reads as lost, never alive-but-frozen). The head scan returns each
+run's `heartbeat_at`; `PollingInstanceDirectory` refreshes it onto the proxy's
+snapshot without emitting events, and the run answers `is_lost()` past 3× the
+interval (the directory logs the transition once). Readers
 *interpret, never mutate*: a lost run stays in the view, visible and
 attributable — writing `ABANDONED` would break single-writer-per-instance and
 race across connectors; automatic reaping was later considered and **rejected**
@@ -643,9 +643,9 @@ deferred with the liveness track.
 permanent per-transport choice behind the seam). The persistence write+read
 path now ships dark and complete: `RunStatePersister` (per-instance attach +
 flush thread), the `updated_at` + `state_updated_at` columns, `store_active_runs`,
-`read_active_runs`, `active_run_versions()`, and `DbInstanceDiscovery` — across
+`read_active_runs`, `active_run_heads()`, and `DbInstanceDiscovery` — across
 both storage backends (SQLite, PostgreSQL). The poll directory is built too:
-`PollingInstanceDirectory` (version scan + deep-read-changed + evict-absent) +
+`PollingInstanceDirectory` (head scan + deep-read-changed + evict-absent) +
 `SnapshotJobInstanceProxy` + snapshot-diff synthesis. What remained was *selecting*
 it as a backend kind and the heartbeat track — both since done (the `postgres`
 kind composes it; heartbeats ride the flush thread). The poll
@@ -665,9 +665,10 @@ for the default.
 
 Consumer-side — one operation per tick:
 
-1. **Cheap version scan.** `SELECT job_id, run_id, ordinal, updated_at FROM runs
-   WHERE ended IS NULL AND root_phase IS NOT NULL` — ids + freshness, no blobs,
-   no deserialization (a new `active_run_versions()` on `RunStorage`).
+1. **Cheap head scan.** `SELECT job_id, run_id, ordinal, updated_at, heartbeat_at
+   FROM runs WHERE ended IS NULL AND run IS NOT NULL` — ids + change cursor +
+   heartbeat, no blobs, no deserialization (`active_run_heads()` on `RunStorage`,
+   returning `RunHead` rows).
 2. **Deep-read only changed.** Compare each `updated_at` to the directory's
    `{id: updated_at}` cursor; `read_active_runs(match_ids(changed))` for the
    ones that moved.
@@ -685,13 +686,14 @@ Consumer-side — one operation per tick:
 ```python
 # implemented as PollingInstanceDirectory.reconcile()
 def reconcile():
-    versions = dict(db.active_run_versions())              # cheap: ids + updated_at cursor, no blobs
-    changed = [iid for iid, cur in versions.items() if seen.get(iid) != cur]
+    heads = {h.instance_id: h for h in db.active_run_heads()}  # cheap: ids + cursor + heartbeat, no blobs
+    changed = [iid for iid, h in heads.items() if seen.get(iid) != h.cursor]
     for run in db.read_active_runs(instances_match(changed)):   # deep-read ONLY changed
         _apply(run)                                        # admit new, else update_from_snapshot (is_newer_than + synth)
-    for iid in seen.keys() - versions.keys():
+    for iid in seen.keys() - heads.keys():
         _evict_absent(iid)                                 # terminal → emit ENDED then drop; else drop
-    seen = versions
+    seen = {iid: h.cursor for iid, h in heads.items()}
+    _refresh_heartbeats(heads)                             # silent snapshot replace, no events
 ```
 
 Two timestamp roles, kept distinct: **`updated_at`** (column, write-time,
@@ -706,7 +708,7 @@ state machine, no `NOTIFY` payload limit, no trigger DDL, no watermark/skew.
 
 Intervals:
 
-- **Active poll: 250ms** (while ≥1 active run) — cheap version scans; deep-read
+- **Active poll: 250ms** (while ≥1 active run) — cheap head scans; deep-read
   only on change.
 - **Idle poll: 2s** (no active runs) — enough to notice a new run appearing.
 - **Flush (`PERSIST_FLUSH_INTERVAL`): 250ms** — matched to the active poll so
@@ -1041,7 +1043,7 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
 - **Consumer side: pull-only reads; events only under demand.**
   `_fetch_output_tail` reads the facet. The polled kind carries no wire
   output events, and the directory never polls output unconditionally
-  (volume would dwarf the run-state version scan) — output events are
+  (volume would dwarf the run-state head scan) — output events are
   synthesized per proxy only while a real output observer is registered
   (the follow-mode design, remaining work 1), so cost lands only on
   instances someone actually tails. Proxies cache no output — `tail()`
@@ -1108,8 +1110,46 @@ distinguish:
 ```text
 storage-active     = row non-terminal          (the active scan)
 operationally-live = heartbeat fresh           (attestation)
-lost               = active AND not live       (SnapshotJobInstanceProxy.is_lost)
+lost               = active AND not live       (JobRun.is_lost)
 ```
+
+**Liveness on the run.** The heartbeat is a variable of the run, so anyone
+holding a `JobRun` can answer liveness — no separate verdict type or
+liveness channel:
+
+```python
+@dataclass(frozen=True)
+class JobRun:
+    ...
+    heartbeat_at: Optional[datetime] = field(default=None, compare=False)
+
+    def is_lost(self, *, now=None, stale_after=HEARTBEAT_STALE_AFTER) -> bool:
+        """Whether this run is non-ended and its known heartbeat is stale."""
+```
+
+- **Storage metadata, not job state.** `heartbeat_at` is attached from the
+  column on every storage read; it is excluded from equality, the serialized
+  document, and `is_newer_than` — a heartbeat refresh is never a state change.
+- **`is_lost` contract.** Ended runs → `False` (resolved, never lost); no known
+  heartbeat (`None`: live RPC/event snapshots, in-process runs) → `False`
+  (unknown is not lost). `now` is injectable for deterministic tests. A stale
+  heartbeat is evidence of lost contact, not proof the node is dead.
+- **Immutable refresh.** The polling directory refreshes a proxy's heartbeat by
+  replacing its snapshot, emitting no state events; ordinary snapshot updates
+  preserve the latest known heartbeat (`None` never erases one). Both writes
+  come from the poll thread (single writer per proxy). Consumers holding an
+  older snapshot re-read the heartbeat from the instance at paint time.
+- **Reader clock (accepted limitation).** `is_lost` compares against the
+  reader's clock. Skew between reader and storage can cause false or delayed
+  LOST badges; the operator claim (`claim_lost_runs`) evaluates staleness on
+  the storage clock and remains authoritative. The orphan sweeps'
+  `live_instances` likewise stays on the storage clock and needs proof of life
+  (`NULL` heartbeat → not live) — the opposite default to `is_lost`, which is
+  why there is no `is_alive`.
+- **Storage read independent of discovery.** `EnvironmentConnector.read_active_runs`
+  returns persisted non-ended snapshots (lost ones included, init-only rows
+  excluded) on every kind — the local kind's live view drops a dead node's
+  runs, storage does not.
 
 **Decision: no automatic reaper.** A crashed owner's rows stay non-terminal;
 consumers classify them as lost and treat them as not operationally active.
@@ -1155,8 +1195,8 @@ def claim_lost_runs(stale_after: float) -> list[InstanceID]:
   the claim never writes a timestamp in the storage clock's future (`started`
   is node-clock domain data, so a skewed-ahead node would otherwise leak a
   future timestamp through the floor). A lost run's duration is inherently a
-  cross-clock approximation bounded by skew — same reasoning that makes
-  heartbeat *ages* server-computed.
+  cross-clock approximation bounded by skew — same reasoning that keeps the
+  claim's staleness check on the storage clock.
 - Prerequisite: **all terminal writes become conditional** (`ended IS NULL`) —
   first-writer-wins in either direction, so a recovering owner cannot overwrite
   an operator's resolution (remaining work 2, unit A).
@@ -1274,8 +1314,8 @@ Rejected along the way (keep this list — the candidates keep coming back):
    from the lane: chunked/durable backend upload (crash-durable output; pg
    output storage is the preferred candidate — see point 7) is its own
    later track.
-2. **Lost-run resolution — three self-contained units, in order A → B → C.**
-   B and C each depend only on A.
+2. **Lost-run resolution — self-contained units, in order A → B → C1 → C2.**
+   B and C1 each depend only on A; C2 builds on C1.
    - **A. Conditional terminal writes (done).** `store_runs` writes only rows with
      `ended IS NULL` — the first terminal write wins, in every direction. It
      reports refused rows (already terminal) apart from missing init rows;
@@ -1290,10 +1330,16 @@ Rejected along the way (keep this list — the candidates keep coming back):
      wins anyway, A settles it (the retry is refused as already finalized).
      Node close makes one last attempt; a run still pending then becomes
      LOST and is left to the operator.
-   - **C. `taro env mark-lost`.** Implements the deferred claim contract
+   - **C1. Liveness on the run (done).** `JobRun.heartbeat_at` + `is_lost()`
+     (point 8, "Liveness on the run") replace `InstanceLiveness`,
+     `JobInstance.liveness`, `update_liveness` and taro's
+     `ActiveInstanceRow`; `RunHead` carries `heartbeat_at` instead of a
+     server-computed age; the connector gains `read_active_runs`.
+   - **C2. `taro env mark-lost`.** Implements the deferred claim contract
      (point 8), including the new `TerminationStatus.LOST` (→
-     `Outcome.FAULT`): list the lost candidates matching the patterns,
-     confirm, claim atomically with staleness proven at write time.
+     `Outcome.FAULT`): candidates are `read_active_runs(match)` filtered by
+     `is_lost()`, confirmed, then claimed atomically with staleness proven at
+     write time.
 
    Then the `taro env prune` extension deleting orphan signal/tail rows of
    ended-or-missing instances — the env-without-nodes gap stays an accepted
