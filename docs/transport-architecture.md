@@ -57,7 +57,9 @@ UNLOGGED per-instance tail table in the env db (the node's tail buffer made
 shared); publisher owned by the db access point (registration-time observer
 subscription), independent pull reads and demand-gated output replay through
 the snapshot proxy. Pending output is flushed before terminal state is stored.
-Follow-mode integration and remaining work are described below (remaining work 1).
+Follow mode on polled kinds is implemented (point 7, "Follow mode on polled kinds").
+**Implemented:** lost-run resolution (point 8) — `JobRun.is_lost()`, the
+operator's `taro env mark-lost`, and `taro env clean` for orphan transport rows.
 **Open:** split the `JobInstance` contract (deferred until it bites).
 
 ## Mental model
@@ -478,7 +480,7 @@ output demand. Together with the buffer removal above, the only structural
 output observer left on a proxy is the polled directory's own aggregate
 relay — one known object, excluded by identity where demand is read — so
 output subscriptions are a truthful demand signal, the prerequisite for
-demand-gated output delivery on polled kinds (remaining work 1).
+demand-gated output delivery on polled kinds (point 7, follow mode).
 
 `get_output_tail` carries only `max_lines` on the wire (`0` = all retained).
 The `Mode` enum (HEAD/TAIL) was removed from the whole tail chain — HEAD
@@ -1045,7 +1047,7 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   output events, and the directory never polls output unconditionally
   (volume would dwarf the run-state head scan) — output events are
   synthesized per proxy only while a real output observer is registered
-  (the follow-mode design, remaining work 1), so cost lands only on
+  (follow mode, below), so cost lands only on
   instances someone actually tails. Proxies cache no output — `tail()`
   always pulls the transport tail (see the pull/stream split, point 3), so
   the proxy-side read is a straight delegate.
@@ -1065,6 +1067,68 @@ output_tail table (env db, node-written, bounded per instance, UNLOGGED):
   triggers after ~cap appended lines, so a running instance may briefly
   retain up to ~2× cap rows — the bound governs churn and storage, not an
   exact read size (reads bound themselves via ``max_lines``).
+
+**Follow mode on polled kinds (`taro tail -f`) — implemented.** Follow mode rides output events, which
+polled transports do not carry directly — the directory's reconcile loop
+synthesizes them: for each proxy with a registered output observer
+(demand-gated — no observer, no fetch), fetch the tail increment
+(``read_output_tail`` with ``after_ordinal``) and emit
+`InstanceOutputEvent`s through the proxy hub, with a final increment on
+eviction inside the tail linger window. Each proxy keeps one output cursor,
+initially zero, for its entire lifetime. The first demanded sync replays the
+retained tail, and later syncs catch up across pauses in demand. Pull reads
+are independent and never change the stream cursor; consumers deduplicate
+overlapping lines by ordinal. This deliberately allows bounded replay and
+removes baseline initialization, resets, and subscription handoff locking.
+The cursor relies on publication in ordinal order: the node's output
+pipeline serializes ordinal assignment, processing and dispatch, so a
+producer thread (stdout vs stderr reader) can never be overtaken by a
+higher ordinal and skipped. The capture log handler forwards without taking
+the stdlib handler lock — its `emit()` keeps no state and the pipeline
+serializes publication — so the publish lock is the only lock on the logging
+path and no lock cycle can form with a thread logging concurrently.
+
+The publisher serializes periodic and completion flushes. Before recording
+completion, the node calls the access point's `finalize_instance`, which on
+postgres flushes pending output (with the instance's last prune). If the flush
+fails, it logs the error and still records completion: a failure to update
+the tail cache must not prevent the job's history from being saved. Pending
+lines are retried on subsequent periodic flushes.
+
+When a follower observes completion, it reads any remaining tail lines and
+removes the proxy. If a retry writes more lines after that final read, the
+follower will not receive them as events. Those lines remain available to
+subsequent tail reads until cleanup removes them. This possible loss is
+accepted for the best-effort live tail; complete output is stored separately
+by the configured output backends. The linger window keeps tail rows
+readable briefly after completion, but cannot guarantee delivery of lines
+written after a follower's final read.
+
+Observers must not block startup event delivery: `tail -f` queues output
+during the initial pull, then drains it with ordinal dedup. The command's
+main thread waits for an explicit stop event, independent of transport
+thread lifetime. SIGINT/SIGTERM set that event; command cleanup closes
+the connector. Demand is computed fresh at each tick, never
+mirrored through subscription callbacks — the poll is already there, so
+there is nothing to keep in sync: a proxy has output demand when the
+directory aggregate has any output observer (env-wide — `tail -f` filters
+patterns on the client; one subscription covers current and future instances), or
+when the proxy's own output channel has any observer besides the
+directory's aggregate relay, excluded by identity — the directory knows
+which relay object it installed. Bindings stay static and full; no
+subscription state exists to copy onto admissions; demand changes take
+effect on the next poll. The state/output subscription split (point 3)
+is the landed prerequisite (a dashboard must not trip the env-wide
+check). Instances discovered after the seed poll are announced once
+bound: a lifecycle event at their current stage with its real timestamp,
+so state-event consumers such as `taro listen` learn of runs that
+appeared mid-life. The seed itself stays silent — even an empty one — it
+establishes the view and is not news. Patterned `tail -f` receives late
+arrivals through its environment-wide output subscription, including their
+retained tail, and filters them on the client. One-shot
+`taro tail` works remotely today via the proxy's tail read. Decoupled
+from the lane: chunked/durable backend upload (crash-durable output; pg
+output storage is the preferred candidate) is its own later track.
 
 **Accepted costs.** Bounded MVCC churn per active chatty instance (append +
 prune — same budget argument as the run-state flush); the cap means live reads
@@ -1225,8 +1289,8 @@ def mark_lost_runs(instance_ids, stale_after: float) -> list[InstanceID]:
   owner. It shares `stop`'s look (patterns, preview table, confirm, `-f`), and
   `stop` on a lost instance prints a hint pointing to it instead of sending a
   signal nobody reads.
-- Prerequisite: **all terminal writes conditional** (`ended IS NULL`,
-  remaining work 2, unit A).
+- Prerequisite: **all terminal writes conditional** (`ended IS NULL`;
+  lost-run unit A).
 
 ## Kept decisions
 
@@ -1279,139 +1343,78 @@ Rejected along the way (keep this list — the candidates keep coming back):
 
 ## Remaining work
 
-1. **`taro tail -f` on polled kinds.** Follow mode rides output events, which
-   polled transports do not carry directly — the directory's reconcile loop
-   synthesizes them: for each proxy with a registered output observer
-   (demand-gated — no observer, no fetch), fetch the tail increment
-   (``read_output_tail`` with ``after_ordinal``) and emit
-   `InstanceOutputEvent`s through the proxy hub, with a final increment on
-   eviction inside the tail linger window. Each proxy keeps one output cursor,
-   initially zero, for its entire lifetime. The first demanded sync replays the
-   retained tail, and later syncs catch up across pauses in demand. Pull reads
-   are independent and never change the stream cursor; consumers deduplicate
-   overlapping lines by ordinal. This deliberately allows bounded replay and
-   removes baseline initialization, resets, and subscription handoff locking.
-   The cursor relies on publication in ordinal order: the node's output
-   pipeline serializes ordinal assignment, processing and dispatch, so a
-   producer thread (stdout vs stderr reader) can never be overtaken by a
-   higher ordinal and skipped. The capture log handler forwards without taking
-   the stdlib handler lock — its `emit()` keeps no state and the pipeline
-   serializes publication — so the publish lock is the only lock on the logging
-   path and no lock cycle can form with a thread logging concurrently.
-
-   The publisher serializes periodic and completion flushes. Before recording
-   completion, the node calls the access point's `finalize_instance`, which on
-   postgres flushes pending output (with the instance's last prune). If the flush
-   fails, it logs the error and still records completion: a failure to update
-   the tail cache must not prevent the job's history from being saved. Pending
-   lines are retried on subsequent periodic flushes.
-
-   When a follower observes completion, it reads any remaining tail lines and
-   removes the proxy. If a retry writes more lines after that final read, the
-   follower will not receive them as events. Those lines remain available to
-   subsequent tail reads until cleanup removes them. This possible loss is
-   accepted for the best-effort live tail; complete output is stored separately
-   by the configured output backends. The linger window keeps tail rows
-   readable briefly after completion, but cannot guarantee delivery of lines
-   written after a follower's final read.
-
-   Observers must not block startup event delivery: `tail -f` queues output
-   during the initial pull, then drains it with ordinal dedup. The command's
-   main thread waits for an explicit stop event, independent of transport
-   thread lifetime. SIGINT/SIGTERM set that event; command cleanup closes
-   the connector. Demand is computed fresh at each tick, never
-   mirrored through subscription callbacks — the poll is already there, so
-   there is nothing to keep in sync: a proxy has output demand when the
-   directory aggregate has any output observer (env-wide — `tail -f` filters
-   patterns on the client; one subscription covers current and future instances), or
-   when the proxy's own output channel has any observer besides the
-   directory's aggregate relay, excluded by identity — the directory knows
-   which relay object it installed. Bindings stay static and full; no
-   subscription state exists to copy onto admissions; demand changes take
-   effect on the next poll. The state/output subscription split (point 3)
-   is the landed prerequisite (a dashboard must not trip the env-wide
-   check). Instances discovered after the seed poll are announced once
-   bound: a lifecycle event at their current stage with its real timestamp,
-   so state-event consumers such as `taro listen` learn of runs that
-   appeared mid-life. The seed itself stays silent — even an empty one — it
-   establishes the view and is not news. Patterned `tail -f` receives late
-   arrivals through its environment-wide output subscription, including their
-   retained tail, and filters them on the client. One-shot
-   `taro tail` works remotely today via the proxy's tail read. Decoupled
-   from the lane: chunked/durable backend upload (crash-durable output; pg
-   output storage is the preferred candidate — see point 7) is its own
-   later track.
-2. **Lost-run resolution — self-contained units, in order
-   A → B → C1 → C2 → D.** B and C1 each depend only on A; C2 builds on C1;
-   D needs only storage primitives.
-   - **A. Conditional terminal writes (done).** `store_runs` writes only rows with
-     `ended IS NULL` — the first terminal write wins, in every direction. It
-     reports refused rows (already terminal) apart from missing init rows;
-     the node logs a refusal as *already finalized* — the stored result may
-     be its own earlier successful write, so it is not framed as a conflict.
-     The prerequisite for any second terminal writer (point 8).
-   - **B. Terminal-write retry (done).** A failed final `store_runs` keeps the
-     terminal snapshot pending on the node's flush thread, retried each tick
-     through A's conditional write. Pending runs **keep heartbeating** — a
-     run whose owner is alive and retrying is not lost, so consumers must not
-     show it as LOST during a transient storage outage. If an operator mark
-     wins anyway, A settles it (the retry is refused as already finalized).
-     Node close makes one last attempt; a run still pending then becomes
-     LOST and is left to the operator.
-   - **C1. Liveness on the run (done).** `JobRun.heartbeat_at` + `is_lost()`
-     (point 8, "Liveness on the run") replace `InstanceLiveness`,
-     `JobInstance.liveness`, `update_liveness` and taro's
-     `ActiveInstanceRow`; `RunHead` carries `heartbeat_at` instead of a
-     server-computed age.
-   - **C2. `taro env mark-lost` (done).** The operator mark (point 8),
-     including the new `TerminationStatus.LOST` (→ `Outcome.FAULT`):
-     candidates are `read_active_runs(match)` filtered by `is_lost()`,
-     confirmed, then only the confirmed instances marked atomically with
-     staleness proven at write time — straight against storage
-     (`open_env_db`), not through the connector; `taro stop` on a lost
-     instance points to it.
-
-   - **D. `taro env clean`: orphan transport rows (done).** Node sweeps
-     only run on live nodes, so an environment whose last node is gone keeps
-     its signal and output-tail rows. `clean` — already "remove state left by
-     dead processes" (component dirs, local kind) — removes them on every
-     kind; `prune` stays history retention. Contract:
-     - **Lifecycle, not liveness.** A row is an orphan when its run has
-       ended or has no row at all (`RunStorage.read_run_ends`: identities
-       plus the `ended` column, init-only rows included as non-ended — no
-       snapshots loaded). The node sweep's policy stays separate (heartbeat
-       freshness); only storage primitives are shared.
-     - **Lost runs are untouched** — still non-ended — until `mark-lost`
-       resolves them; ended or missing runs are cleanable immediately,
-       subject to the tail linger (`TAIL_LINGER_AFTER_END`, 10s after
-       `ended`). `clean` removes signal and tail rows, never run history.
-     - **Preview and confirm.** Counts of signal rows and instance tails;
-       `-f` skips the prompt. The previewed rows are deleted without a
-       recheck: ended stays ended, a deleted run row stays deleted, and the
-       linger only expires. The one exception — a pruned ID re-run under a
-       reused ordinal while the prompt waits — is an accepted limitation
-       (ops are re-sendable, the tail is a cache). Rows orphaned while the
-       prompt waits are left to the next run.
-     - Operator commands may mutate; the observation lane never does.
-3. Resolve the `JobInstance` contract split when it bites (open point 1;
+1. Resolve the `JobInstance` contract split when it bites (open point 1;
    remote-run question).
+2. Crash-durable output storage — chunked/durable backend upload so a
+   crashed node's output survives beyond the bounded tail (pg output storage
+   is the preferred candidate, point 7). Parked.
 
-Done since the last revision: the output lane closed end to end —
+Done since the last revision: lost-run resolution (point 8), in order
+A → B → C1 → C2 → D — verified end to end on a real `postgres` environment
+(crash → LOST after ~45s → `stop` hint → `mark-lost` → history LOST →
+`clean`):
+
+- **A. Conditional terminal writes.** `store_runs` writes only rows with
+  `ended IS NULL` — the first terminal write wins, in every direction. It
+  reports refused rows (already terminal) apart from missing init rows;
+  the node logs a refusal as *already finalized* — the stored result may
+  be its own earlier successful write, so it is not framed as a conflict.
+  The prerequisite for any second terminal writer (point 8).
+- **B. Terminal-write retry.** A failed final `store_runs` keeps the
+  terminal snapshot pending on the node's flush thread, retried each tick
+  through A's conditional write. Pending runs **keep heartbeating** — a
+  run whose owner is alive and retrying is not lost, so consumers must not
+  show it as LOST during a transient storage outage. If an operator mark
+  wins anyway, A settles it (the retry is refused as already finalized).
+  Node close makes one last attempt; a run still pending then becomes
+  LOST and is left to the operator.
+- **C1. Liveness on the run.** `JobRun.heartbeat_at` + `is_lost()`
+  (point 8, "Liveness on the run") replace `InstanceLiveness`,
+  `JobInstance.liveness`, `update_liveness` and taro's
+  `ActiveInstanceRow`; `RunHead` carries `heartbeat_at` instead of a
+  server-computed age.
+- **C2. `taro env mark-lost`.** The operator mark (point 8),
+  including the new `TerminationStatus.LOST` (→ `Outcome.FAULT`):
+  candidates are `read_active_runs(match)` filtered by `is_lost()`,
+  confirmed, then only the confirmed instances marked atomically with
+  staleness proven at write time — straight against storage
+  (`open_env_db`), not through the connector; `taro stop` on a lost
+  instance points to it.
+- **D. `taro env clean`: orphan transport rows.** Node sweeps
+  only run on live nodes, so an environment whose last node is gone keeps
+  its signal and output-tail rows. `clean` — already "remove state left by
+  dead processes" (component dirs, local kind) — removes them on every
+  kind; `prune` stays history retention. Contract:
+  - **Lifecycle, not liveness.** A row is an orphan when its run has
+    ended or has no row at all (`RunStorage.read_run_ends`: identities
+    plus the `ended` column, init-only rows included as non-ended — no
+    snapshots loaded). The node sweep's policy stays separate (heartbeat
+    freshness); only storage primitives are shared.
+  - **Lost runs are untouched** — still non-ended — until `mark-lost`
+    resolves them; ended or missing runs are cleanable immediately,
+    subject to the tail linger (`TAIL_LINGER_AFTER_END`, 10s after
+    `ended`). `clean` removes signal and tail rows, never run history.
+  - **Preview and confirm.** Counts of signal rows and instance tails;
+    `-f` skips the prompt. The previewed rows are deleted without a
+    recheck: ended stays ended, a deleted run row stays deleted, and the
+    linger only expires. The one exception — a pruned ID re-run under a
+    reused ordinal while the prompt waits — is an accepted limitation
+    (ops are re-sendable, the tail is a cache). Rows orphaned while the
+    prompt waits are left to the next run.
+  - Operator commands may mutate; the observation lane never does.
+
+Earlier: the output lane closed end to end —
 demand-gated output replay on polled kinds, ordered publication,
 `finalize_instance`, non-blocking `tail -f`, post-seed admission announce,
 and init-row-inclusive sweep attestation (`live_instances` replaced the
-callerless `read_instance_ids`). Earlier: liveness surfaced to consumers end-to-end (the
-lost-run answer, point 8) — `InstanceLiveness` on the `JobInstance` surface
-(default presumed-live; snapshot proxies carry the polling directory's
-verdict); rendered everywhere actives appear: `taro ps`, the dashboard and
-per-job TUI active tables, and the instance selector — `LOST <age>` badge in
-the STATUS cell (which the badge qualifies — that status is exactly what's
-stale) with the whole row dimmed via `lost_aware` column wrapping; text badge,
-not colour-only, so it survives pipes and NO_COLOR; the verdict attaches at
-paint time (`active_row`), read fresh from the proxy each repaint. The jobs
-overview counts are lost-aware: lost instances never inflate "running" (RUNNING
-cell shows them separately, e.g. `2 +1 lost`; header gains an `N lost` metric
-when nonzero). Lost runs stay listed everywhere: visible and attributable.
+callerless `read_instance_ids`). Earlier: liveness surfaced to consumers
+end to end — rendered everywhere actives appear (`taro ps`, the dashboard and
+per-job TUI active tables, the instance selector) as a `LOST <age>` badge in
+the STATUS cell with the whole row dimmed; text, not colour-only, so it
+survives pipes and NO_COLOR. The jobs overview counts are lost-aware (`2 +1
+lost`; an `N lost` header metric when nonzero). Lost runs stay listed
+everywhere: visible and attributable. (Its first shape — `InstanceLiveness`
+on the `JobInstance` surface — was superseded by C1's liveness on the run.)
 Earlier: the control-surface redesign — `exec_control_op`
 deleted as a conceptual API; recording moved into the instance-returned
 `_RecordingPhaseControl` wrapper (record-before-invoke preserved), so local
