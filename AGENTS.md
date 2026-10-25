@@ -50,6 +50,16 @@ taro/venv/bin/python -m pytest taro/test/ -v
 runcli/venv/bin/python -m pytest runcli/test/ -v
 ```
 
+Manual testing uses a shared dev venv at the workspace root, `<workspace-root>/.venv`: all four packages installed
+editable, with the `postgres` and `test` extras, so `run` and `taro` always run the working tree.
+
+- `pg-dev` — a registered `postgres` environment backed by the persistent Docker container `runtools-pg`
+  (`127.0.0.1:5432`, restarts automatically). `local` is the built-in sqlite environment.
+- Postgres lost-run end to end (throwaway container, isolated XDG dirs; ~1 min):
+  `.venv/bin/python runtools/scripts/e2e_lost_run.py`
+- The zellij layout `runtools` (`~/.config/zellij/layouts/runtools.kdl`) wires this up: Local and Postgres tabs
+  (`run` shell, `taro` shell, `dash`) and a Tests tab with every suite plus the e2e.
+
 ## Coding Standards
 
 - Check existing project patterns before introducing new ones — learn the style
