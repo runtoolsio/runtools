@@ -113,6 +113,25 @@ at load — the config itself stores neither `id` nor `kind`. All config models 
 | `retention.keep_days`             | all   | Default retention for `env prune`: keep finished runs newer than N days            | none                 |
 | `plugins`                         | all   | Plugin name → config mapping                                                       | empty                |
 
+### Output storage across machines
+
+The default output storage (`file`) writes a run's complete output to the disk of the machine that ran it. On a
+`postgres` environment, other machines then see only the live tail — while the run is going and briefly after.
+To read finished runs' output from any machine, store it in S3 (or an S3-compatible service) instead — install
+`runtoolsio[s3]` on every machine and set it with `taro env edit`:
+
+```toml
+[[output.storages]]
+type = "s3"
+bucket = "my-bucket"
+prefix = "runtools/work"     # optional key prefix
+region = "eu-west-1"         # optional; default AWS chain otherwise
+# endpoint_url = "..."       # S3-compatible services (R2, MinIO)
+# profile = "..."            # named AWS profile
+```
+
+Credentials come from the standard AWS chain (environment, profile, instance role) on each machine.
+
 ### Schema compatibility (beta)
 
 Each database records its schema version. During the beta, a release may change the schema without a migration:
@@ -210,11 +229,28 @@ with in_process() as env:
 ### Creating
 
 ```bash
-taro env create dev                                # default DB path
-taro env create staging --path ~/data/staging.db   # custom DB path
+taro env create dev                                # local: default DB path
+taro env create staging --path ~/data/staging.db   # local: custom DB path
+taro env create work --dsn postgresql://runtools@db.internal/runtools   # postgres
 ```
 
-Creates the SQLite database (initializes schema) and adds an entry to the registry.
+Provisions the store — a SQLite database, or the environment's schema in PostgreSQL — seeds the default config, and
+adds an entry to the registry. A store that already exists is refused rather than re-seeded, since other machines may
+share its config.
+
+For postgres, keep the password out of the DSN (the registry stores it as plain text) and put it in `~/.pgpass`,
+which libpq reads by itself. Point the DSN at PostgreSQL or a session-mode pooler, not a transaction-mode one
+(coordination uses session advisory locks), and use a database you can reset — see
+[Schema compatibility](#schema-compatibility-beta).
+
+### Adding an existing environment
+
+```bash
+taro env add work --dsn postgresql://runtools@db.internal/runtools
+```
+
+Registers an environment whose store already exists — the way every other machine joins a postgres environment.
+Use the same name it was created with; its stored config is left untouched.
 
 The built-in local environment is auto-created by runjob/runcli on first use. It cannot be created via
 `taro env create`.

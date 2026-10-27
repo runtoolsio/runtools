@@ -8,4 +8,4 @@ This meta-package installs all runtools components:
 - runtools-taro: CLI for managing and monitoring jobs
 """
 
-__version__ = "0.3.0b1"
+__version__ = "0.3.0b2"

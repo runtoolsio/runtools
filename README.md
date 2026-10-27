@@ -2,7 +2,7 @@
 
 Lightweight job coordination, monitoring, and history for scripts and programs.
 
-> **Beta (0.3.0b1).** APIs and CLIs are stabilizing. A beta release may change the database schema without a
+> **Beta (0.3.0b2).** APIs and CLIs are stabilizing. A beta release may change the database schema without a
 > migration — the environment must then be recreated, losing its history; such releases say so.
 
 Wrap any program with mutual exclusion, queuing, approvals, and observability — without deploying
@@ -42,6 +42,7 @@ pip install runtoolsio[ops]   # Ops CLI only (taro + runcore)
 pip install runtoolsio[core]  # Core library only
 pip install runtoolsio[job]   # Execution library only (runjob + runcore)
 pip install runtoolsio[postgres]  # Add the PostgreSQL driver for `postgres` environments
+pip install runtoolsio[s3]        # Add S3 output storage (output readable from any machine)
 ```
 
 ## Packages
