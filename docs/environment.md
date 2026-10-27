@@ -202,7 +202,9 @@ operation is recorded in the run's history (`control_requests`). A pending comma
 target — runs die with their node, so a command posted around an owning-node crash is never applied (the
 run is reported lost, see below, and the pending command is eventually swept from the mailbox). Crashed nodes are
 detected via heartbeats: a run whose node stops attesting liveness for 45 s is reported as lost by consumers (never
-auto-terminated) — see [Resolving lost runs](#resolving-lost-runs). The environment `location` must be a direct DSN (session advisory locks are incompatible
+auto-terminated) — see [Resolving lost runs](#resolving-lost-runs). Access is controlled by PostgreSQL roles, not
+file permissions — see [Security (postgres)](#security-postgres).
+The environment `location` must be a direct DSN (session advisory locks are incompatible
 with transaction-mode poolers). Live output of another node's instances is readable as a bounded
 tail (roughly the newest `tail_cap` lines — the cap is amortized, so briefly up to about twice
 that may be retained between prune cycles; roughly 1–2 s behind live; `tail_cap: 0` disables
@@ -251,6 +253,47 @@ taro env add work --dsn postgresql://runtools@db.internal/runtools
 
 Registers an environment whose store already exists — the way every other machine joins a postgres environment.
 Use the same name it was created with; its stored config is left untouched.
+
+### Security (postgres)
+
+A `local` environment is protected by file permissions on its database and sockets. A `postgres` environment is
+protected by PostgreSQL alone — runtools adds no permissions of its own: any role with full operator access to the
+environment's schema (`USAGE` on it plus privileges on its tables and sequences) can watch, stop and approve jobs,
+mark runs lost, delete history and edit the config.
+
+- **Who can connect:** login roles and `pg_hba.conf`. Keep the password in `~/.pgpass` (mode 600 — libpq ignores
+  it otherwise), not in the DSN: the registry stores the DSN as plain text, so `taro env create`/`add` warn about a
+  password there, and `taro env list` masks it.
+- **Who can operate:** `USAGE` on the environment's schema (`runtools_<name>_<hash>`) plus privileges on its tables
+  and sequences. Deleting the environment drops the schema, which needs ownership. A new schema is private to the
+  role that created it — unless role memberships or the database's default privileges grant others access.
+- **In transit:** use `sslmode=verify-full` in the DSN. It needs a CA the client trusts (`sslrootcert`) and a
+  server certificate matching the DSN's host — otherwise connecting fails. `sslmode=require` encrypts but does not
+  guarantee server identity verification (it skips the hostname check).
+- **Coordination:** advisory locks are shared by the whole database, not per schema — any role that can connect can
+  hold a key and block a mutex or queue. Use a dedicated database.
+
+#### One login, or one per person
+
+- **Shared login** — simplest: everyone who has it is an operator; revoking one person means changing it for all.
+- **Separate logins sharing a group role** — each person or machine logs in as itself but acts as the group, so the
+  group owns the environment and every member can operate it; one login is revoked alone. They also make
+  attribution possible: with server logging configured for it (e.g. `log_line_prefix` with `%u`, and a
+  `log_statement` level covering the operations), PostgreSQL logs show which login did what — runtools itself
+  records no identities:
+
+  ```sql
+  CREATE ROLE runtools_ops NOLOGIN;
+  GRANT CREATE ON DATABASE runtools TO runtools_ops;   -- to create environment schemas
+  CREATE ROLE alice LOGIN;
+  GRANT runtools_ops TO alice;                          -- likewise for each person or machine
+  ```
+
+  ```bash
+  # options=-c role=... switches each session to the group role (URL-encoded in the DSN)
+  taro env create work --dsn "postgresql://alice@db.internal/runtools?sslmode=verify-full&options=-c%20role%3Druntools_ops"
+  taro env add work --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full&options=-c%20role%3Druntools_ops"
+  ```
 
 The built-in local environment is auto-created by runjob/runcli on first use. It cannot be created via
 `taro env create`.

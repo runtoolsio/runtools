@@ -3,6 +3,14 @@
 All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lockstep during the beta.
 **Breaking** marks changes that need action when upgrading.
 
+## 0.3.0b3 — 2026-10-27
+
+- postgres: a DSN's `options` (e.g. `-c role=runtools_ops` for logins sharing a group role) now reach every pooled
+  connection — before, they were replaced, so environments ended up owned by the individual login.
+- `taro env list` masks DSN passwords; `taro env create`/`add` warn when the DSN holds one (prefer `~/.pgpass`).
+- Docs: postgres security — access is PostgreSQL privileges, TLS with `verify-full`, one login vs. separate logins
+  sharing a group role.
+
 ## 0.3.0b2 — 2026-10-27
 
 - `taro env create NAME --dsn DSN` creates a postgres environment; `taro env add NAME --dsn DSN` joins one created
