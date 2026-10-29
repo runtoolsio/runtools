@@ -3,6 +3,13 @@
 All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lockstep during the beta.
 **Breaking** marks changes that need action when upgrading.
 
+## Unreleased
+
+- runjob: stopping a job (`taro stop`, timeout, SIGTERM to `run job`) now also stops the processes it started —
+  for jobs running **without a terminal** (cron, systemd, services). Before, only the program itself was stopped;
+  a surviving child kept the output open and the run never ended. Such jobs now run in their own process group.
+  Jobs started in a terminal are unchanged: they still stop only the program itself.
+
 ## 0.3.0b3 — 2026-10-27
 
 - postgres: a DSN's `options` (e.g. `-c role=runtools_ops` for logins sharing a group role) now reach every pooled

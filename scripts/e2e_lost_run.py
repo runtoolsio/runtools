@@ -80,11 +80,17 @@ def wait_for_postgres(container):
 
 
 def kill_process_group(pgid):
-    """Kill what is left of the node's process group — the job's workload outlives a SIGKILLed node."""
+    """Kill what is left of a process group — the job's workload outlives a SIGKILLed node."""
     try:
         os.killpg(pgid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+def child_pids(pid):
+    """Direct children of ``pid`` — without a terminal each job runs in its own process group, led by such a child."""
+    out = subprocess.run(['pgrep', '-P', str(pid)], capture_output=True, text=True).stdout
+    return [int(p) for p in out.split()]
 
 
 def main():
@@ -92,6 +98,7 @@ def main():
     os.environ.update({var: str(xdg / var.lower())
                        for var in ('XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME')})
     container = node_proc = None
+    job_groups = []
     try:
         container = start_postgres()
         dsn = wait_for_postgres(container)
@@ -113,6 +120,7 @@ def main():
         tail = wait_for(lambda: (lambda o: o if 'started' in o else None)(taro('tail', instance_id)), 30)
         check("tail serves the job's output through the db", tail is not None, taro('tail', instance_id))
 
+        job_groups = child_pids(node_proc.pid)  # recorded while the node is alive, to clean up after the crash
         os.kill(node_proc.pid, signal.SIGKILL)
         node_proc.wait()
         crashed_at = time.monotonic()
@@ -144,8 +152,8 @@ def main():
         out = taro('env', 'clean', '-f')
         check("a second clean finds nothing", 'No orphan' in out, out)
     finally:
-        if node_proc:
-            kill_process_group(node_proc.pid)
+        for pgid in (node_proc.pid, *job_groups) if node_proc else ():
+            kill_process_group(pgid)
         if container:
             subprocess.run(['docker', 'rm', '-f', container], capture_output=True)
         shutil.rmtree(xdg, ignore_errors=True)
