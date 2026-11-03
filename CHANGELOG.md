@@ -12,8 +12,10 @@ All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lo
 - Unchanged: jobs in a terminal's foreground still stop only the program itself. A background job brought back with
   `fg` stays in its own process group, so Ctrl+C reaches only `run job` and terminal input stops the job.
 - runcli: `run job --approve PHASE_ID` runs the program only after `taro approve -p PHASE_ID` (waiting holds no queue
-  slot or exclusion lock); `run job --depends-on PATTERN` (repeatable) ends the job `UNSATISFIED` unless a matching
-  job is running.
+  slot or exclusion lock); `run job --depends-on PATTERN` (repeatable, globs) ends the job `UNSATISFIED` unless a
+  matching job is running — a lost run doesn't count; `run job --await PATTERN` (repeatable, `--await-timeout`)
+  waits until a matching run has ended, with any outcome, like `taro wait` — runs that already ended count, so name
+  the run (`JOB@RUN_ID` with a shared run ID).
 - Docs: PostgreSQL environment guide (`docs/postgres.md`) — what runtools creates, TLS setup, tested access profiles.
 
 ## 0.3.0b3 — 2026-10-27
