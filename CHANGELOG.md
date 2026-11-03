@@ -15,7 +15,8 @@ All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lo
   slot or exclusion lock); `run job --depends-on PATTERN` (repeatable, globs) ends the job `UNSATISFIED` unless a
   matching job is running — a lost run doesn't count; `run job --await PATTERN` (repeatable, `--await-timeout`)
   waits until a matching run has ended, with any outcome, like `taro wait` — runs that already ended count, so name
-  the run (`JOB@RUN_ID` with a shared run ID).
+  the run (`JOB@RUN_ID` with a shared run ID), or skip history with `--await-future-only` (runjob: `AwaitPhase`
+  takes `search_past`, default `True`).
 - Docs: PostgreSQL environment guide (`docs/postgres.md`) — what runtools creates, TLS setup, tested access profiles.
 
 ## 0.3.0b3 — 2026-10-27
