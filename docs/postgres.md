@@ -10,7 +10,7 @@ You provide a database (a dedicated one is recommended, see [Connection security
 environment you create becomes one schema in it:
 
 ```text
-database "runtools"                      ← you create it
+database "runtools_db"                   ← you create it
 ├── schema runtools_billing_cacfdbb4fbf4 ← environment "billing", created by `taro env create`
 │   ├── runs          one row per job run: its state, timestamps and the node's heartbeat
 │   ├── run_tags      tags of runs
@@ -48,12 +48,12 @@ a name in that certificate:
 
 ```bash
 # a company or self-signed CA — either name it in the DSN …
-taro env add billing --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem"
+taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem"
 # … or install it once where libpq looks by default, and leave sslrootcert out
 mkdir -p ~/.postgresql && cp company-ca.pem ~/.postgresql/root.crt
 
 # a CA your OS already trusts (e.g. a managed cloud database)
-taro env add billing --dsn "postgresql://bob@db.example.com/runtools?sslmode=verify-full&sslrootcert=system"
+taro env add billing --dsn "postgresql://bob@db.example.com/runtools_db?sslmode=verify-full&sslrootcert=system"
 ```
 
 If it's missing, connecting fails with `root certificate file "…/.postgresql/root.crt" does not exist`; a host that
@@ -65,20 +65,20 @@ Simplest setup — one login shared by every machine and person; everyone who ha
 
 ```sql
 -- as a PostgreSQL superuser
-CREATE DATABASE runtools;
-CREATE ROLE runtools LOGIN PASSWORD '…';
-GRANT CREATE ON DATABASE runtools TO runtools;
+CREATE DATABASE runtools_db;
+CREATE ROLE runtools_user LOGIN PASSWORD '…';
+GRANT CREATE ON DATABASE runtools_db TO runtools_user;
 ```
 
 On each machine, put the password in `~/.pgpass` (mode `600`) instead of the DSN:
 
 ```text
-db.internal:5432:runtools:runtools:the-password
+db.internal:5432:runtools_db:runtools_user:the-password
 ```
 
 ```bash
-taro env create billing --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"   # once
-taro env add billing --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"      # every other machine
+taro env create billing --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"   # once
+taro env add billing --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"      # every other machine
 ```
 
 ## Access profiles
@@ -103,7 +103,7 @@ tables, so an operator login could also write those tables with plain SQL. The f
 This recipe stands on its own. It needs a database for runtools — create one first if you skipped the quick start:
 
 ```sql
-CREATE DATABASE runtools;
+CREATE DATABASE runtools_db;
 ```
 
 Then, as a PostgreSQL superuser connected to it:
@@ -114,7 +114,7 @@ CREATE ROLE runtools_admin NOLOGIN;
 CREATE ROLE runtools_node NOLOGIN;
 CREATE ROLE runtools_operator NOLOGIN;
 CREATE ROLE runtools_viewer NOLOGIN;
-GRANT CREATE ON DATABASE runtools TO runtools_admin;   -- lets admins create environment schemas
+GRANT CREATE ON DATABASE runtools_db TO runtools_admin;   -- lets admins create environment schemas
 
 -- One login per person or machine, each in one profile
 CREATE ROLE stan LOGIN PASSWORD '…';      GRANT runtools_admin TO stan;
@@ -130,7 +130,7 @@ environment is owned by the profile rather than one person — any admin can the
 
 ```bash
 taro env create billing \
-  --dsn "postgresql://stan@db.internal/runtools?sslmode=verify-full&options=-c%20role%3Druntools_admin"
+  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Druntools_admin"
 ```
 
 ### 3. Grant the profiles access to it
@@ -155,7 +155,7 @@ GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO runtools_operator;
 ```
 
 ```bash
-psql "postgresql://stan@db.internal/runtools?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
+psql "postgresql://stan@db.internal/runtools_db?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
 ```
 
 Re-run it whenever the environment is recreated — for example after a beta release that changes the schema.
@@ -165,8 +165,8 @@ Re-run it whenever the environment is recreated — for example after a beta rel
 Each login joins with its own DSN; no role switch is needed, the profile's grants apply automatically:
 
 ```bash
-taro env add billing --dsn "postgresql://build01@db.internal/runtools?sslmode=verify-full"   # on a node
-taro env add billing --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full"       # on a viewer's laptop
+taro env add billing --dsn "postgresql://build01@db.internal/runtools_db?sslmode=verify-full"   # on a node
+taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=verify-full"       # on a viewer's laptop
 ```
 
 A refused action reports PostgreSQL's error — `permission denied for table signals` (not an operator) or
@@ -215,7 +215,7 @@ watch running jobs but not read finished runs' full output.
   only its own `runtools_…` schemas. But job coordination uses PostgreSQL advisory locks, which are shared by the
   whole database, not per schema: any login that can connect could hold a lock key and block a mutex or queue. A
   dedicated database limits that to runtools logins, keeps `GRANT CREATE ON DATABASE` and beta schema resets away
-  from other data, and costs nothing extra on an existing server (`CREATE DATABASE runtools`).
+  from other data, and costs nothing extra on an existing server (`CREATE DATABASE runtools_db`).
 - **Privileges can come from elsewhere:** role memberships and the database's default privileges (`ALTER DEFAULT
   PRIVILEGES`) may give other roles access beyond what this page grants — check them on shared servers.
 - **Pooling:** connect directly or through a session-mode pooler, not a transaction-mode one — coordination relies on
