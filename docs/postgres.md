@@ -6,10 +6,11 @@ puts in the database, how to set up access, and what each kind of user can do.
 
 ## What runtools creates
 
-You provide a database; each environment you create becomes one schema in it:
+You provide a database (a dedicated one is recommended, see [Connection security](#connection-security)); each
+environment you create becomes one schema in it:
 
 ```text
-database "runtools"                     ← you create it (dedicated to runtools)
+database "runtools"                     ← you create it
 ├── schema runtools_work_5bfd9a70c7d9   ← environment "work", created by `taro env create`
 │   ├── runs          one row per job run: its state, timestamps and the node's heartbeat
 │   ├── run_tags      tags of runs
@@ -206,9 +207,11 @@ watch running jobs but not read finished runs' full output.
   certificate matching the DSN's host — otherwise connecting fails. `sslmode=require` encrypts but does not
   guarantee server identity verification (it skips the hostname check).
 - **Who can connect at all:** login roles and `pg_hba.conf` — limit it to the machines that run or watch jobs.
-- **A dedicated database:** job coordination uses PostgreSQL advisory locks, which are shared by the whole database,
-  not per schema — any login that can connect could hold a lock key and block a mutex or queue. A dedicated database
-  also keeps beta schema resets away from other data.
+- **A dedicated database (recommended, not required):** runtools works in a shared database — it creates and drops
+  only its own `runtools_…` schemas. But job coordination uses PostgreSQL advisory locks, which are shared by the
+  whole database, not per schema: any login that can connect could hold a lock key and block a mutex or queue. A
+  dedicated database limits that to runtools logins, keeps `GRANT CREATE ON DATABASE` and beta schema resets away
+  from other data, and costs nothing extra on an existing server (`CREATE DATABASE runtools`).
 - **Privileges can come from elsewhere:** role memberships and the database's default privileges (`ALTER DEFAULT
   PRIVILEGES`) may give other roles access beyond what this page grants — check them on shared servers.
 - **Pooling:** connect directly or through a session-mode pooler, not a transaction-mode one — coordination relies on
