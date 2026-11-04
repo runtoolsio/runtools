@@ -81,6 +81,14 @@ taro env create billing --dsn "postgresql://runtools_user@db.internal/runtools_d
 taro env add billing --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"      # every other machine
 ```
 
+- `create` provisions the environment in the database — its schema and default config — and registers it on this
+  machine. It needs `CREATE` on the database and refuses a schema that already exists: the config is shared, so it is
+  never re-seeded.
+- `add` only registers an existing environment on this machine, leaving the database untouched; it fails if the
+  schema doesn't exist, so a wrong name or DSN shows up at once.
+- The registry is per user (`~/.config/runtools/environments.toml`): each account that runs `run job` or `taro`
+  needs its own `add`, even where `create` ran under another account.
+
 ## Access profiles
 
 To separate who can do what, give each person and machine their own login and put it in one of four profiles.
