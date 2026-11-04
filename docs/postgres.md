@@ -10,16 +10,20 @@ You provide a database (a dedicated one is recommended, see [Connection security
 environment you create becomes one schema in it:
 
 ```text
-database "runtools"                     ← you create it
-├── schema runtools_work_5bfd9a70c7d9   ← environment "work", created by `taro env create`
+database "runtools"                      ← you create it
+├── schema runtools_billing_cacfdbb4fbf4 ← environment "billing", created by `taro env create`
 │   ├── runs          one row per job run: its state, timestamps and the node's heartbeat
 │   ├── run_tags      tags of runs
 │   ├── signals       commands waiting for a node: stop, approve, resume, …
 │   ├── output_tail   the newest ~1000 output lines of running jobs (a cache, dropped after the run ends)
 │   ├── config        environment settings: output storage, retention, tail size
 │   └── schema_info   schema version
-└── schema runtools_staging_…           ← another environment
+└── schema runtools_reporting_…          ← another environment
 ```
+
+The environment name (`billing` in this guide) is yours to choose — `taro env create billing` picks it, and jobs and
+`taro` select the environment by it (`run job -e billing …`, `taro ps -e billing`). Every machine must register the
+environment under the same name: the schema is found by it.
 
 The schema name is `runtools_` + the environment name (`-` becomes `_`) + a hash. List them with:
 
@@ -44,12 +48,12 @@ a name in that certificate:
 
 ```bash
 # a company or self-signed CA — either name it in the DSN …
-taro env add work --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem"
+taro env add billing --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem"
 # … or install it once where libpq looks by default, and leave sslrootcert out
 mkdir -p ~/.postgresql && cp company-ca.pem ~/.postgresql/root.crt
 
 # a CA your OS already trusts (e.g. a managed cloud database)
-taro env add work --dsn "postgresql://bob@db.example.com/runtools?sslmode=verify-full&sslrootcert=system"
+taro env add billing --dsn "postgresql://bob@db.example.com/runtools?sslmode=verify-full&sslrootcert=system"
 ```
 
 If it's missing, connecting fails with `root certificate file "…/.postgresql/root.crt" does not exist`; a host that
@@ -73,8 +77,8 @@ db.internal:5432:runtools:runtools:the-password
 ```
 
 ```bash
-taro env create work --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"   # once
-taro env add work --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"      # every other machine
+taro env create billing --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"   # once
+taro env add billing --dsn "postgresql://runtools@db.internal/runtools?sslmode=verify-full"      # every other machine
 ```
 
 ## Access profiles
@@ -125,7 +129,7 @@ The admin's DSN switches the session to the `runtools_admin` role (`options=-c r
 environment is owned by the profile rather than one person — any admin can then manage it:
 
 ```bash
-taro env create work \
+taro env create billing \
   --dsn "postgresql://stan@db.internal/runtools?sslmode=verify-full&options=-c%20role%3Druntools_admin"
 ```
 
@@ -135,7 +139,7 @@ Save as `grants.sql` and run it as an admin with the environment's schema name (
 
 ```sql
 -- Run as an admin after `taro env create`, with the environment's schema name:
---   psql ... -v schema=runtools_work_3f9a0c1b2d4e -f grants.sql
+--   psql ... -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
 SET ROLE runtools_admin;
 GRANT USAGE ON SCHEMA :"schema" TO runtools_node, runtools_operator, runtools_viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO runtools_node, runtools_operator, runtools_viewer;
@@ -151,7 +155,7 @@ GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO runtools_operator;
 ```
 
 ```bash
-psql "postgresql://stan@db.internal/runtools?sslmode=verify-full" -v schema=runtools_work_5bfd9a70c7d9 -f grants.sql
+psql "postgresql://stan@db.internal/runtools?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
 ```
 
 Re-run it whenever the environment is recreated — for example after a beta release that changes the schema.
@@ -161,8 +165,8 @@ Re-run it whenever the environment is recreated — for example after a beta rel
 Each login joins with its own DSN; no role switch is needed, the profile's grants apply automatically:
 
 ```bash
-taro env add work --dsn "postgresql://build01@db.internal/runtools?sslmode=verify-full"   # on a node
-taro env add work --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full"       # on a viewer's laptop
+taro env add billing --dsn "postgresql://build01@db.internal/runtools?sslmode=verify-full"   # on a node
+taro env add billing --dsn "postgresql://bob@db.internal/runtools?sslmode=verify-full"       # on a viewer's laptop
 ```
 
 A refused action reports PostgreSQL's error — `permission denied for table signals` (not an operator) or
@@ -174,20 +178,20 @@ Run a small job on a node, then watch and stop it from the viewer's and the oper
 
 ```bash
 # node (build01): prints the time every second until stopped
-run job -e work -j demo sh -c 'while true; do date; sleep 1; done'
+run job -e billing -j demo sh -c 'while true; do date; sleep 1; done'
 ```
 
 ```bash
 # viewer (bob)
-taro ps -e work                 # demo   …   EXEC
-taro tail -e work demo          # the latest timestamps
-taro stop -e work -f demo       # refused: … permission denied for table signals
+taro ps -e billing                 # demo   …   EXEC
+taro tail -e billing demo          # the latest timestamps
+taro stop -e billing -f demo       # refused: … permission denied for table signals
 ```
 
 ```bash
 # operator (alice)
-taro stop -e work -f demo       # ✓ Stopped demo@…
-taro history -e work            # demo   …   STOPPED
+taro stop -e billing -f demo       # ✓ Stopped demo@…
+taro history -e billing            # demo   …   STOPPED
 ```
 
 ## Job output
