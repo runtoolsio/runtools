@@ -148,18 +148,24 @@ Save as `grants.sql` and run it as an admin with the environment's schema name (
 ```sql
 -- Run as an admin after `taro env create`, with the environment's schema name:
 --   psql ... -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
-SET ROLE runtools_admin;
-GRANT USAGE ON SCHEMA :"schema" TO runtools_node, runtools_operator, runtools_viewer;
-GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO runtools_node, runtools_operator, runtools_viewer;
+-- Profiles default to runtools_admin, runtools_node, …; per-environment ones are passed as
+--   -v admin=… -v node=… -v operator=… -v viewer=…  (see Per-environment permissions)
+\if :{?admin} \else \set admin runtools_admin \endif
+\if :{?node} \else \set node runtools_node \endif
+\if :{?operator} \else \set operator runtools_operator \endif
+\if :{?viewer} \else \set viewer runtools_viewer \endif
+SET ROLE :"admin";
+GRANT USAGE ON SCHEMA :"schema" TO :"node", :"operator", :"viewer";
+GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO :"node", :"operator", :"viewer";
 -- Nodes: record runs, publish output, consume commands
-GRANT INSERT, UPDATE ON :"schema".runs TO runtools_node;
-GRANT INSERT ON :"schema".run_tags TO runtools_node;
-GRANT INSERT, DELETE ON :"schema".output_tail TO runtools_node;
-GRANT DELETE ON :"schema".signals TO runtools_node;
+GRANT INSERT, UPDATE ON :"schema".runs TO :"node";
+GRANT INSERT ON :"schema".run_tags TO :"node";
+GRANT INSERT, DELETE ON :"schema".output_tail TO :"node";
+GRANT DELETE ON :"schema".signals TO :"node";
 -- Operators: send commands (stop, approve), mark-lost, clean, prune
-GRANT INSERT, DELETE ON :"schema".signals TO runtools_operator;
-GRANT UPDATE, DELETE ON :"schema".runs TO runtools_operator;
-GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO runtools_operator;
+GRANT INSERT, DELETE ON :"schema".signals TO :"operator";
+GRANT UPDATE, DELETE ON :"schema".runs TO :"operator";
+GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO :"operator";
 ```
 
 ```bash
@@ -201,6 +207,43 @@ taro stop -e billing -f demo       # refused: … permission denied for table si
 taro stop -e billing -f demo       # ✓ Stopped demo@…
 taro history -e billing            # demo   …   STOPPED
 ```
+
+### Per-environment permissions
+
+The profiles above apply to every environment `grants.sql` ran for. To give one login different rights in different
+environments — alice operates `billing` but only watches `reporting` — create a set of profiles per environment:
+
+```sql
+-- as a PostgreSQL superuser; the same four roles for reporting_…
+CREATE ROLE billing_admin NOLOGIN;
+CREATE ROLE billing_node NOLOGIN;
+CREATE ROLE billing_operator NOLOGIN;
+CREATE ROLE billing_viewer NOLOGIN;
+GRANT CREATE ON DATABASE runtools_db TO billing_admin, reporting_admin;
+
+GRANT billing_admin, reporting_admin TO stan;
+GRANT billing_node TO build01;
+GRANT reporting_node TO build02;
+GRANT billing_operator, reporting_viewer TO alice;
+```
+
+Create each environment as its own admin role, then pass that environment's profiles to `grants.sql`:
+
+```bash
+taro env create billing \
+  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dbilling_admin"
+psql "postgresql://stan@db.internal/runtools_db?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 \
+  -v admin=billing_admin -v node=billing_node -v operator=billing_operator -v viewer=billing_viewer -f grants.sql
+```
+
+Every login then joins with `taro env add` as in step 4, and gets in each environment only what its profiles there
+allow: alice's `taro stop -e billing` works, `taro stop -e reporting` is refused, and `build01` can't run jobs in
+`reporting` at all — it reports `relation "schema_info" does not exist`, as a schema without `USAGE` is invisible.
+
+Each environment's schema is owned by its own admin role, so `billing_admin` can't change or delete `reporting`.
+Still shared by the whole database: who can connect, `CREATE` on it (any environment's admin can create new
+environments) and advisory locks (see [Connection security](#connection-security)). For full separation — different
+teams or trust levels — give each environment its own database.
 
 ## Job output
 
