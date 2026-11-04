@@ -134,47 +134,21 @@ CREATE ROLE bob LOGIN PASSWORD '…';       GRANT runtools_viewer TO bob;
 ### 2. Create the environment as an admin
 
 The admin's DSN switches the session to the `runtools_admin` role (`options=-c role=…`, URL-encoded), so the
-environment is owned by the profile rather than one person — any admin can then manage it:
+environment is owned by the profile rather than one person — any admin can then manage it. `--grant-profiles runtools`
+grants `runtools_node`, `runtools_operator` and `runtools_viewer` their access:
 
 ```bash
-taro env create billing \
+taro env create billing --grant-profiles runtools \
   --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Druntools_admin"
 ```
 
-### 3. Grant the profiles access to it
+- The grants are made in the transaction that creates the environment: a missing role fails the command, and nothing
+  is created (`Roles not found: runtools_operator`).
+- They come with the tables, so they always match the schema. When the environment is recreated — for example after
+  a beta release that changes the schema — the same command restores them.
+- runtools only grants; creating the roles and adding logins to them stays with you (step 1).
 
-Save as `grants.sql` and run it as an admin with the environment's schema name (see the query above):
-
-```sql
--- Run as an admin after `taro env create`, with the environment's schema name:
---   psql ... -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
--- Profiles default to runtools_admin, runtools_node, …; per-environment ones are passed as
---   -v admin=… -v node=… -v operator=… -v viewer=…  (see Per-environment permissions)
-\if :{?admin} \else \set admin runtools_admin \endif
-\if :{?node} \else \set node runtools_node \endif
-\if :{?operator} \else \set operator runtools_operator \endif
-\if :{?viewer} \else \set viewer runtools_viewer \endif
-SET ROLE :"admin";
-GRANT USAGE ON SCHEMA :"schema" TO :"node", :"operator", :"viewer";
-GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO :"node", :"operator", :"viewer";
--- Nodes: record runs, publish output, consume commands
-GRANT INSERT, UPDATE ON :"schema".runs TO :"node";
-GRANT INSERT ON :"schema".run_tags TO :"node";
-GRANT INSERT, DELETE ON :"schema".output_tail TO :"node";
-GRANT DELETE ON :"schema".signals TO :"node";
--- Operators: send commands (stop, approve), mark-lost, clean, prune
-GRANT INSERT, DELETE ON :"schema".signals TO :"operator";
-GRANT UPDATE, DELETE ON :"schema".runs TO :"operator";
-GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO :"operator";
-```
-
-```bash
-psql "postgresql://stan@db.internal/runtools_db?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 -f grants.sql
-```
-
-Re-run it whenever the environment is recreated — for example after a beta release that changes the schema.
-
-### 4. Join from every other machine
+### 3. Join from every other machine
 
 Each login joins with its own DSN; no role switch is needed, the profile's grants apply automatically:
 
@@ -186,7 +160,7 @@ taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=ver
 A refused action reports PostgreSQL's error — `permission denied for table signals` (not an operator) or
 `must be owner of schema …` (admins only).
 
-### 5. Check it works
+### 4. Check it works
 
 Run a small job on a node, then watch and stop it from the viewer's and the operator's machines:
 
@@ -210,8 +184,9 @@ taro history -e billing            # demo   …   STOPPED
 
 ### Per-environment permissions
 
-The profiles above apply to every environment `grants.sql` ran for. To give one login different rights in different
-environments — alice operates `billing` but only watches `reporting` — create a set of profiles per environment:
+The profiles above apply to every environment created with `--grant-profiles runtools`. To give one login different
+rights in different environments — alice operates `billing` but only watches `reporting` — create a set of profiles
+per environment:
 
 ```sql
 -- as a PostgreSQL superuser; the same four roles for reporting_…
@@ -227,16 +202,16 @@ GRANT reporting_node TO build02;
 GRANT billing_operator, reporting_viewer TO alice;
 ```
 
-Create each environment as its own admin role, then pass that environment's profiles to `grants.sql`:
+Create each environment as its own admin role, granting its own profiles:
 
 ```bash
-taro env create billing \
+taro env create billing --grant-profiles billing \
   --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dbilling_admin"
-psql "postgresql://stan@db.internal/runtools_db?sslmode=verify-full" -v schema=runtools_billing_cacfdbb4fbf4 \
-  -v admin=billing_admin -v node=billing_node -v operator=billing_operator -v viewer=billing_viewer -f grants.sql
+taro env create reporting --grant-profiles reporting \
+  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dreporting_admin"
 ```
 
-Every login then joins with `taro env add` as in step 4, and gets in each environment only what its profiles there
+Every login then joins with `taro env add` as in step 3, and gets in each environment only what its profiles there
 allow: alice's `taro stop -e billing` works, `taro stop -e reporting` is refused, and `build01` can't run jobs in
 `reporting` at all — it reports `relation "schema_info" does not exist`, as a schema without `USAGE` is invisible.
 
@@ -244,6 +219,36 @@ Each environment's schema is owned by its own admin role, so `billing_admin` can
 Still shared by the whole database: who can connect, `CREATE` on it (any environment's admin can create new
 environments) and advisory locks (see [Connection security](#connection-security)). For full separation — different
 teams or trust levels — give each environment its own database.
+
+### Granting an existing environment
+
+To grant profiles to an environment created without `--grant-profiles`, save this as `grants.sql` — the same grants,
+for the current schema — and run it as a member of the environment's owner role (e.g. an admin):
+
+```sql
+-- Grants an environment's profile roles <prefix>_node, _operator and _viewer — what
+-- `taro env create --grant-profiles` does at creation. Run as a member of the schema's owner role:
+--   psql ... -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=billing -f grants.sql
+\set node :prefix '_node'
+\set operator :prefix '_operator'
+\set viewer :prefix '_viewer'
+GRANT USAGE ON SCHEMA :"schema" TO :"node", :"operator", :"viewer";
+GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO :"node", :"operator", :"viewer";
+-- Nodes: record runs, publish output, consume commands
+GRANT INSERT, UPDATE ON :"schema".runs TO :"node";
+GRANT INSERT ON :"schema".run_tags TO :"node";
+GRANT INSERT, DELETE ON :"schema".output_tail TO :"node";
+GRANT DELETE ON :"schema".signals TO :"node";
+-- Operators: send commands (stop, approve), mark-lost, clean, prune
+GRANT INSERT, DELETE ON :"schema".signals TO :"operator";
+GRANT UPDATE, DELETE ON :"schema".runs TO :"operator";
+GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO :"operator";
+```
+
+```bash
+psql "postgresql://stan@db.internal/runtools_db?sslmode=verify-full" \
+  -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=billing -f grants.sql
+```
 
 ## Job output
 

@@ -3,6 +3,14 @@
 All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lockstep during the beta.
 **Breaking** marks changes that need action when upgrading.
 
+## 0.3.0b5 — unreleased
+
+- taro: `taro env create NAME --dsn DSN --grant-profiles PREFIX` grants the existing roles `PREFIX_node`,
+  `PREFIX_operator` and `PREFIX_viewer` access to the new postgres environment, in the transaction that creates it —
+  a missing role fails the command and nothing is created. Replaces running `grants.sql` after `create`, which is
+  kept for environments created without the option.
+- Docs: PostgreSQL guide — per-environment permissions; `grants.sql` takes the role prefix (`-v prefix=…`).
+
 ## 0.3.0b4 — 2026-10-29
 
 - runjob: stopping a job (`taro stop`, timeout, SIGTERM to `run job`) now also stops the processes it started, for
