@@ -1,68 +1,20 @@
 # PostgreSQL environments
 
-Use a PostgreSQL environment when jobs on different machines need to share history, coordinate, or be controlled
-from one place. You create the environment once, then join it from each machine that runs or watches jobs.
+A PostgreSQL environment lets jobs on many machines share one history: run a job on one machine, then watch, stop
+or approve it from any other. The page has two parts:
 
-Start with the task you need:
+- **[Tutorial](#tutorial)** — use cases from the simplest to the more involved; each builds on the previous one.
+- **[Reference](#reference)** — how it works, all the options, and troubleshooting.
 
-| I want to… | Start here |
-|---|---|
-| Try runtools across two machines | [One shared login](#try-it-across-two-machines) |
-| Let someone watch without changing anything | [Add a viewer](#let-someone-watch-jobs) |
-| Let a teammate stop and approve jobs | [Add an operator](#let-a-teammate-operate-jobs) |
-| Give a job server its own credentials | [Add a node login](#give-a-job-server-its-own-login) |
-| Give people different access to billing and reporting | [Per-environment permissions](#give-teams-different-access-to-environments) |
+## Tutorial
 
-The first recipe gets you running. The next three build on it. The team recipe is an alternative for new environments.
-You don't need to read the whole page before starting.
+You need a PostgreSQL server, runtools with the `postgres` extra on each machine, and someone who can create roles
+in PostgreSQL — the SQL below runs in `psql` as a database administrator. The examples use the host `db.internal`,
+the database `runtools_db` and an environment named `billing`; use your own names.
 
-## Before you start
+### 1. Share jobs between two machines
 
-You'll need PostgreSQL, `run` and `taro` installed with PostgreSQL support, and someone who can create database roles.
-The SQL examples run in `psql`. Your database administrator can run them for you.
-
-Replace `db.internal` with your database host. We use `runtools_db` for the database and `billing` for the environment;
-you can choose other names. Every machine must use the same environment name because runtools uses it to find the
-right schema.
-
-### TLS
-
-The examples use `sslmode=verify-full`, which encrypts the connection and checks the server's identity. Ask your
-administrator for the server's CA certificate and install it on each machine:
-
-```bash
-mkdir -p ~/.postgresql
-cp company-ca.pem ~/.postgresql/root.crt
-```
-
-The hostname in the connection string must match the server certificate. If you're using Amazon RDS or need another
-way to configure TLS, see [Connection security](#connection-security).
-
-### Passwords
-
-Keep passwords in `~/.pgpass`, not in connection strings. Runtools saves connection strings in its local registry.
-Each machine needs a line for the login it uses:
-
-```text
-db.internal:5432:runtools_db:runtools_user:the-password
-```
-
-Protect the file:
-
-```bash
-chmod 600 ~/.pgpass
-```
-
-In later recipes, replace `runtools_user` with that person's or machine's login. The `\password` commands below prompt
-for a password without putting the plaintext password in your SQL history.
-
-## Try it across two machines
-
-This is the simplest setup for a trusted team. Everyone shares one login and can manage the environment.
-
-### Create the database and login
-
-Ask your PostgreSQL administrator to run:
+Everyone uses one PostgreSQL login. The administrator creates it with a database:
 
 ```sql
 CREATE DATABASE runtools_db;
@@ -71,353 +23,268 @@ GRANT CREATE ON DATABASE runtools_db TO runtools_user;
 \password runtools_user
 ```
 
-Put that password in `~/.pgpass` on both machines, as shown above.
+On both machines, add the password to `~/.pgpass` and make the file private (`chmod 600 ~/.pgpass`):
 
-### Create once, join elsewhere
-
-On the first machine:
-
-```bash
-taro env create billing --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"
+```text
+db.internal:5432:runtools_db:runtools_user:the-password
 ```
 
-On the second machine:
+Create the environment on the first machine, then join it from the second:
 
 ```bash
-taro env add billing --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"
+taro env create billing --dsn "postgresql://runtools_user@db.internal/runtools_db"   # first machine
+taro env add billing --dsn "postgresql://runtools_user@db.internal/runtools_db"      # second machine
 ```
 
-`create` creates the schema and default settings, and registers the environment locally. `add` only registers it;
-it doesn't change the shared settings. Each OS account has its own registry, so another account on the same machine
-also needs to run `add`.
-
-### Run, watch, and stop a job
-
-On the first machine, start a job that prints the time every second:
+Run a job on the first machine:
 
 ```bash
 run job -e billing -j demo sh -c 'while true; do date; sleep 1; done'
 ```
 
-On the second machine:
+Watch and stop it from the second:
 
 ```bash
-taro ps -e billing
-taro tail -e billing demo
-taro stop -e billing -f demo
+taro ps -e billing            # demo is running
+taro tail -e billing demo     # its latest output
+taro stop -e billing demo     # stops it on the first machine
+taro history -e billing       # demo ended STOPPED
 ```
 
-Once the job finishes, check its history:
+Both machines now see the same jobs. Use `-e billing` in these commands to select the shared environment.
+
+The connection isn't verified yet — [use case 3](#3-secure-the-connection) fixes that.
+
+### 2. Run jobs from cron or a service
+
+Servers usually run jobs under a service account. Each OS account keeps its own list of environments, so register
+`billing` as that account, with the password in that account's `~/.pgpass`:
 
 ```bash
-taro history -e billing
+sudo -iu jobs     # become the service account
+taro env add billing --dsn "postgresql://runtools_user@db.internal/runtools_db"
 ```
 
-You should see `demo` with a `STOPPED` outcome. Stopping is a request to the node, so completion may take a moment.
+Then always pass `-e`:
 
-Always use `-e billing` for jobs meant for this environment. Without `-e`, `run job` uses the built-in `local`
-environment, even when `billing` is registered. It warns in that case, but still runs locally. Interactive `taro`
-asks you to choose when several environments are available; in scripts it requires `-e`.
+```text
+0 2 * * *  run job -e billing -j nightly-report /opt/jobs/report.sh
+```
 
-## Let someone watch jobs
+Without `-e`, the job runs in `local` and never shows up in `billing`; `run job` prints a warning, but cron may not
+show it to anyone.
 
-Suppose Bob needs to see jobs and their output, but shouldn't stop jobs or change settings.
-This recipe assumes `billing` already exists. Its owner sets up the permissions; Bob only needs his own login.
+### 3. Secure the connection
 
-### Set up the environment's profiles once
+So far the connection is encrypted only if the server offers it, and nothing checks that the server is the real one.
+`sslmode=verify-full` does both. It needs, on each machine, the CA certificate that signed the server's certificate —
+ask your administrator for it:
 
-A profile is just a PostgreSQL group role. Runtools uses three conventional names for node, operator, and viewer
-access. Ask your database administrator to create the set for billing, unless it already exists:
+```bash
+mkdir -p ~/.postgresql
+cp company-ca.pem ~/.postgresql/root.crt
+```
+
+On Amazon RDS, use AWS's bundle instead — see [TLS](#tls).
+
+Then add `?sslmode=verify-full` to the DSN. For an environment already registered, edit its `location` in
+`~/.config/runtools/environments.toml`:
+
+```toml
+[environments.billing]
+kind = "postgres"
+location = "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"
+```
+
+Don't use `taro env delete` to re-register: it drops the shared environment for everyone. New registrations simply
+include `?sslmode=verify-full` from the start, as in the rest of this tutorial.
+
+### 4. Let someone only watch
+
+So far everyone shares one login and can do everything. To give Bob read-only access, he gets his own login in a
+**profile** — a PostgreSQL group role standing for a permission level. runtools uses three:
+
+| Profile | For |
+|---|---|
+| `runtools_viewer` | watching jobs and output |
+| `runtools_operator` | also stopping, approving and cleaning up jobs |
+| `runtools_node` | machines that run jobs |
+
+The administrator creates them once:
 
 ```sql
-CREATE ROLE billing_node NOLOGIN;
-CREATE ROLE billing_operator NOLOGIN;
-CREATE ROLE billing_viewer NOLOGIN;
+CREATE ROLE runtools_node NOLOGIN;
+CREATE ROLE runtools_operator NOLOGIN;
+CREATE ROLE runtools_viewer NOLOGIN;
 ```
 
-For an existing environment, its owner applies the [existing-environment grants](#granting-an-existing-environment)
-once, using prefix `billing`. If you're setting up a new environment instead, create these roles first and use:
+The profiles then need access to `billing`. It already exists, so grant it once with the
+[grants script](#granting-profiles-to-an-existing-environment). An environment created from now on gets it right
+away:
 
 ```bash
-taro env create billing --grant-profiles billing \
-  --dsn "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full"
+taro env create reporting --grant-profiles runtools --dsn "…"
 ```
 
-Choose the route that fits your setup. Don't run `create` again for an existing environment.
-The flag grants access to the three roles; it doesn't create roles or logins. Provisioning and grants happen in one
-transaction, so a missing role fails the command without leaving a new environment behind.
-
-### Add Bob
-
-The database administrator runs:
+Now Bob's login — the administrator runs:
 
 ```sql
 CREATE ROLE bob LOGIN;
-GRANT billing_viewer TO bob;
+GRANT runtools_viewer TO bob;
 \password bob
 ```
 
-If Bob already has a login, only the `GRANT` is needed.
-
-On Bob's machine, configure the CA and add this line to his private `~/.pgpass`:
-
-```text
-db.internal:5432:runtools_db:bob:his-password
-```
-
-Then Bob joins:
+Bob puts his password in `~/.pgpass`, installs the CA, and joins with his own login:
 
 ```bash
 taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=verify-full"
 ```
 
-### Check Bob's access
+He can watch (`taro ps`, `taro tail`, `taro history`), but `taro stop -e billing demo` is refused with
+`permission denied for table signals`.
 
-With a demo job running, Bob can watch it:
+### 5. Let a teammate stop jobs
 
-```bash
-taro ps -e billing
-taro tail -e billing demo
-taro history -e billing
-```
-
-This command should be refused with a PostgreSQL permission error for `signals`:
-
-```bash
-taro stop -e billing -f demo
-```
-
-These restrictions assume Bob has no broader access through other role memberships or grants. For complete output
-stored outside PostgreSQL, see [Job output](#job-output).
-
-## Let a teammate operate jobs
-
-Suppose Alice needs to stop and approve jobs, resolve lost runs, and clean up history. Use the `billing_operator`
-profile from the previous recipe. Its grants must already have been applied to billing.
-
-The database administrator runs:
+Alice should also stop and approve jobs. With the profiles in place, it's one grant:
 
 ```sql
 CREATE ROLE alice LOGIN;
-GRANT billing_operator TO alice;
+GRANT runtools_operator TO alice;
 \password alice
 ```
 
-For an existing login, run only the `GRANT`. Alice adds her password to `~/.pgpass`, configures the CA, and joins:
+She joins like Bob, with her own login, and her `taro stop` works.
 
-```bash
-taro env add billing --dsn "postgresql://alice@db.internal/runtools_db?sslmode=verify-full"
-```
+### 6. Give a job server its own login
 
-With a demo job running, Alice can stop it:
-
-```bash
-taro stop -e billing -f demo
-```
-
-After it finishes, `taro history -e billing` shows its outcome. Alice can also use `approve`, `resume`, `env mark-lost`,
-`env clean`, and `env prune`. She cannot edit environment settings or delete the environment itself.
-
-## Give a job server its own login
-
-Use the `billing_node` profile for a server that runs jobs. This avoids sharing the environment owner's credentials.
-As above, the profile and its grants must already exist.
-
-The database administrator runs:
+Servers that only run jobs don't need the shared login. Give each one a login in the node profile:
 
 ```sql
 CREATE ROLE build01 LOGIN;
-GRANT billing_node TO build01;
+GRANT runtools_node TO build01;
 \password build01
 ```
 
-On the server, configure the CA and `~/.pgpass` for `build01`, then register the environment under the OS account
-that runs the jobs:
+On the server, register `billing` with that login, as the account that runs the jobs:
 
 ```bash
+sudo -iu jobs
 taro env add billing --dsn "postgresql://build01@db.internal/runtools_db?sslmode=verify-full"
-run job -e billing -j node-check echo hello
 ```
 
-Check `taro history -e billing` for a completed `node-check` run. The node can record runs, publish output, and apply
-commands. It cannot edit environment settings or drop the environment.
+If that account already registered `billing` with the shared login ([use case 2](#2-run-jobs-from-cron-or-a-service)),
+`add` refuses it as already registered — change the login in its `location` instead, as in
+[use case 3](#3-secure-the-connection).
 
-## Give teams different access to environments
+The server can run jobs, but can't change the environment's settings or delete it. Once every person and server has
+its own login, nobody needs the shared `runtools_user` login except whoever administers the environment.
 
-Use a separate profile set for each environment when people need different access. In this example, Alice operates
-billing but only watches reporting. Stan administers both.
+### 7. Separate teams
 
-This is a recipe for two new environments. Use an existing `runtools_db`, or ask your administrator to create it:
+The `runtools_*` profiles give the same rights in every environment. If Alice should operate `billing` but only watch
+`reporting`, give each environment its own set of profiles, named after it:
 
 ```sql
-CREATE DATABASE runtools_db;
+CREATE ROLE billing_node NOLOGIN;     CREATE ROLE reporting_node NOLOGIN;
+CREATE ROLE billing_operator NOLOGIN; CREATE ROLE reporting_operator NOLOGIN;
+CREATE ROLE billing_viewer NOLOGIN;   CREATE ROLE reporting_viewer NOLOGIN;
 ```
 
-The database administrator creates the profiles:
+Give each set access to its environment with the [grants script](#granting-profiles-to-an-existing-environment),
+prefix `billing` and `reporting`. An environment created from now on gets its own set right away, once the
+administrator has created `payments_node`, `payments_operator` and `payments_viewer` like the roles above —
+otherwise the command fails and creates nothing:
 
-```sql
-CREATE ROLE billing_admin NOLOGIN;
-CREATE ROLE billing_node NOLOGIN;
-CREATE ROLE billing_operator NOLOGIN;
-CREATE ROLE billing_viewer NOLOGIN;
-
-CREATE ROLE reporting_admin NOLOGIN;
-CREATE ROLE reporting_node NOLOGIN;
-CREATE ROLE reporting_operator NOLOGIN;
-CREATE ROLE reporting_viewer NOLOGIN;
-
-GRANT CREATE ON DATABASE runtools_db TO billing_admin, reporting_admin;
+```bash
+taro env create payments --grant-profiles payments --dsn "…"
 ```
 
-For new logins, run:
+Then move Alice. Permissions add up, so she must also leave the shared operator profile — otherwise it still lets her
+stop jobs in `reporting`:
 
 ```sql
-CREATE ROLE stan LOGIN;
-CREATE ROLE alice LOGIN;
-\password stan
-\password alice
-```
-
-Skip those statements for logins that already exist. Assign membership:
-
-```sql
-GRANT billing_admin, reporting_admin TO stan;
+REVOKE runtools_operator FROM alice;
 GRANT billing_operator, reporting_viewer TO alice;
 ```
 
-Permissions add up. If Alice already belongs to a broader operator or admin role, adding viewer membership doesn't
-remove that access. Review her existing memberships before relying on this separation.
-
-After configuring his CA and `~/.pgpass`, Stan creates the environments. The connection strings switch to the matching
-admin role so each schema belongs to a group, rather than to Stan personally:
-
-```bash
-taro env create billing --grant-profiles billing \
-  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dbilling_admin"
-taro env create reporting --grant-profiles reporting \
-  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dreporting_admin"
-```
-
-Alice configures her CA and `~/.pgpass`, then joins both:
-
-```bash
-taro env add billing --dsn "postgresql://alice@db.internal/runtools_db?sslmode=verify-full"
-taro env add reporting --dsn "postgresql://alice@db.internal/runtools_db?sslmode=verify-full"
-```
-
-She can view both environments. With a demo job running in each, `taro stop -e billing -f demo` is allowed and
-`taro stop -e reporting -f demo` is refused. Add job-server logins to each environment's node profile using the
-[node recipe](#give-a-job-server-its-own-login).
-
-For existing environments, apply the [manual grants](#granting-an-existing-environment) for each prefix instead of
-creating them again. Grants don't change schema ownership; creating separate admin profiles doesn't transfer
-existing environments to them.
+Now her `taro stop -e billing …` works and `taro stop -e reporting …` is refused. To also give each environment its
+own administrators, see [Admin profiles](#admin-profiles).
 
 ## Reference
 
-You can stop here if your setup works. The rest explains the database layout and the less common setup options.
-
 ### What runtools creates
 
-Each environment is one schema inside your PostgreSQL database:
+You provide the database; each environment becomes one schema in it:
 
 ```text
 database "runtools_db"
-├── schema runtools_billing_cacfdbb4fbf4
-│   ├── runs          run state, history, and heartbeats
-│   ├── run_tags      tags attached to runs
-│   ├── signals       pending commands such as stop and approve
-│   ├── output_tail   recent output, retained briefly after completion
-│   ├── config        output storage, retention, and other settings
+├── schema runtools_billing_cacfdbb4fbf4   ← environment "billing"
+│   ├── runs          one row per job run: state, timestamps, the node's heartbeat
+│   ├── run_tags      tags of runs
+│   ├── signals       commands waiting for a node: stop, approve, resume, …
+│   ├── output_tail   the newest ~1000 output lines of running jobs (a cache, dropped after the run ends)
+│   ├── config        environment settings: output storage, retention, tail size
 │   └── schema_info   schema version
-└── schema runtools_reporting_…
+└── schema runtools_reporting_…            ← environment "reporting"
 ```
 
-`create` provisions a schema and registers it. `add` registers an existing one without changing its settings.
-Registration is per OS user, in `~/.config/runtools/environments.toml` by default.
-
-### Permissions at a glance
-
-Runtools has no separate user database. A login gets access through membership in a PostgreSQL role that has the
-appropriate grants:
-
-```text
-bob → billing_viewer → read access to billing's tables
-alice → billing_operator → read and operational write access to billing's tables
-```
-
-| Profile | Typical use | Access |
-|---|---|---|
-| admin / schema owner | Environment administration | All environment operations, including config changes and schema deletion |
-| node | Job servers | Read data, record runs and tags, publish output, consume commands |
-| operator | People managing jobs | Read data, send commands, resolve lost runs, clean transport rows, prune history |
-| viewer | Monitoring | Read data; cannot write through these grants |
-
-These are table permissions, not restrictions on individual CLI commands. A role allowed to update `runs` can also
-update it through SQL. Node and operator permissions overlap, but neither profile grants config writes or schema
-ownership. Each environment's admin owns its schema; `--grant-profiles` configures only node, operator, and viewer.
-
-If a login's commands fail with `relation "schema_info" does not exist`, it may lack `USAGE` on the environment's
-schema — check that its profile was granted on that environment.
-
-When a beta release requires recreating an environment, pass the same `--grant-profiles` prefix again to restore its
-grants. Keep the PostgreSQL roles and memberships unless you also intend to change who has access.
-
-### Job output
-
-PostgreSQL holds the recent tail, not complete output. Full output lives in the configured output backend.
-For S3, nodes need bucket write access, and people reading finished runs with `taro output` need read access.
-PostgreSQL viewer membership doesn't provide those credentials. See
-[Output storage across machines](environment.md#output-storage-across-machines).
-
-### Connection security
-
-A dedicated database is recommended. Environments use separate schemas, but advisory locks and database-level
-permissions are shared. Separate databases give teams a stronger boundary than separate schemas alone.
-
-Allow the required logins and machines in `pg_hba.conf`, or the equivalent settings on your managed service.
-Connect directly or through a session-mode pooler. Transaction-mode pooling doesn't support the session advisory
-locks used for coordination.
-
-For Amazon RDS, you can install its CA bundle on each client:
-
-```bash
-mkdir -p ~/.postgresql
-curl -fSs -o ~/.postgresql/root.crt https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
-```
-
-You can also choose the trust source in the connection string:
-
-```text
-…/runtools_db?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem
-…/runtools_db?sslmode=verify-full&sslrootcert=system
-```
-
-Use `system` only when your libpq version supports it and the issuing CA is in that system trust store.
-A missing CA file or a hostname that doesn't match the certificate causes the connection to fail.
-
-For a TLS connection using SCRAM password authentication, `sslmode=require&channel_binding=require` is an alternative
-that doesn't require distributing a CA. It requires channel binding and fails if it is unavailable. It doesn't check
-the certificate chain or hostname; `verify-full` remains the recommendation. An MD5-stored password isn't enough:
-the administrator must set `password_encryption = 'scram-sha-256'` before resetting the password with `\password`,
-and the server must use SCRAM authentication.
-
-### Who did what
-
-Runtools doesn't record the identity of the person issuing each command. Separate logins allow attribution through
-PostgreSQL logging when configured, for example using `%u` in `log_line_prefix` and a suitable `log_statement` setting.
-
-### Granting an existing environment
-
-`--grant-profiles` grants at creation. To grant profiles to an environment created without it, run these grants as
-the environment owner, or a member of its role. They need the environment's schema name — `runtools_` + the
-environment name (`-` becomes `_`) + a hash; list them with:
+The schema name is `runtools_` + the environment name (`-` becomes `_`) + a hash. List them with:
 
 ```sql
 SELECT nspname FROM pg_namespace WHERE nspname LIKE 'runtools\_%' ORDER BY nspname;
 ```
 
-Save as `grants.sql` — the same grants `--grant-profiles` makes, for the current schema:
+### Registering environments
+
+- `taro env create` provisions the schema and default settings, and registers the environment on this machine. It
+  needs `CREATE` on the database and refuses a schema that already exists — the settings are shared, so they are
+  never re-seeded.
+- `taro env add` only registers an existing environment; it fails if the schema doesn't exist, so a wrong name or
+  DSN shows up at once.
+- The registry is per OS account: `~/.config/runtools/environments.toml`. Every account that runs `run job` or `taro`
+  needs its own `add`.
+- `taro env delete` on a postgres environment drops its schema — for everyone, not only on this machine.
+- Every machine must use the same environment name: runtools finds the schema by it.
+
+**Without `-e`**, commands use the built-in `local` environment. Once another environment is registered, `run job`
+still runs in `local` but warns, and `taro` asks which one in a terminal and requires `-e` in scripts.
+
+### Profiles and permissions
+
+runtools has no users or permission checks of its own — access is plain PostgreSQL privileges in two links:
+
+```text
+login    ──member of──▶  profile (group role)  ──has access to──▶  environment (schema)
+alice                    runtools_operator                         billing, reporting
+```
+
+A login can act in an environment only when both links exist. You make the first with `GRANT <profile> TO <login>`;
+runtools makes the second (`--grant-profiles`, or the grants script).
+
+| Profile | For | Can | Cannot |
+|---|---|---|---|
+| admin (schema owner) | whoever administers the environment | everything below, plus change settings (`taro env edit`) and delete the environment | — |
+| node | machines that run jobs | record runs, publish output, apply commands | change settings, delete the environment |
+| operator | people managing jobs | view, plus `stop`, `approve`/`resume`, `mark-lost`, `clean`, `prune` | change settings, delete the environment |
+| viewer | people watching | `ps`, `dash`, `history`, `tail`, `env show` | anything that writes |
+
+- Grants are per table, not per command: node and operator both write `runs` and `signals`, so an operator could also
+  write those tables with plain SQL. The firm boundaries are viewer (read-only) and admin (settings and deletion).
+- Permissions add up: a login also keeps whatever its other role memberships, and the database's default privileges
+  (`ALTER DEFAULT PRIVILEGES`), give it.
+- After a beta release that recreates environments, create them again with the same `--grant-profiles` prefix. Roles
+  and memberships stay as they are.
+
+### Granting profiles
+
+`--grant-profiles PREFIX` grants the existing roles `PREFIX_node`, `PREFIX_operator` and `PREFIX_viewer` access to the
+new environment, in the same transaction that creates it: a missing role fails the command and nothing is created.
+runtools never creates roles or logins.
+
+#### Granting profiles to an existing environment
+
+For an environment created without `--grant-profiles`, save this as `grants.sql` and run it as the environment's
+owner (or a member of its owner role), with the schema name from [What runtools creates](#what-runtools-creates):
 
 ```sql
 -- Grants an environment's profile roles <prefix>_node, _operator and _viewer — what
@@ -441,5 +308,97 @@ GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO :"operator";
 
 ```bash
 psql "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full" \
-  -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=billing -f grants.sql
+  -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=runtools -f grants.sql
 ```
+
+#### Admin profiles
+
+The environment belongs to the login that created it. To let a group administer it instead, create an admin role,
+allow it to create environments, and switch to it in the creating DSN (`options=-c role=…`, URL-encoded):
+
+```sql
+CREATE ROLE billing_admin NOLOGIN;
+GRANT CREATE ON DATABASE runtools_db TO billing_admin;
+GRANT billing_admin TO stan;
+```
+
+```bash
+taro env create billing --grant-profiles billing \
+  --dsn "postgresql://stan@db.internal/runtools_db?sslmode=verify-full&options=-c%20role%3Dbilling_admin"
+```
+
+Each environment's schema is owned by its admin role, so `billing_admin` can't change or delete `reporting`. Ownership
+doesn't move later: an existing environment stays with whoever created it.
+
+### TLS
+
+`sslmode=verify-full` encrypts the connection and checks the server's certificate and hostname. The client needs the
+CA that signed the server's certificate, and the DSN's host must be a name in that certificate.
+
+```bash
+# a company or self-signed CA: where libpq looks by default
+mkdir -p ~/.postgresql && cp company-ca.pem ~/.postgresql/root.crt
+
+# Amazon RDS: its CA isn't in OS trust stores — install AWS's bundle
+curl -fsS -o ~/.postgresql/root.crt https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+```
+
+Or name the CA in the DSN:
+
+```text
+…/runtools_db?sslmode=verify-full&sslrootcert=/etc/ssl/company-ca.pem   # a CA file elsewhere
+…/runtools_db?sslmode=verify-full&sslrootcert=system                    # a CA the OS trusts (libpq 16+)
+```
+
+A missing CA fails with `root certificate file "…/.postgresql/root.crt" does not exist`; a host that isn't in the
+certificate fails with `server certificate for "…" does not match host name`.
+
+**Without a CA file:** for password logins using SCRAM, `?sslmode=require&channel_binding=require` ties the login to
+the TLS connection, so a server in the middle can't complete it. It fails if channel binding is unavailable —
+including for a password stored as `md5`; run `SET password_encryption = 'scram-sha-256';` before `\password` to be
+sure. It doesn't verify the certificate or hostname: `verify-full` remains the recommendation.
+
+### Passwords
+
+Keep passwords in `~/.pgpass` (`host:port:database:login:password`, mode `600` — libpq ignores it otherwise), never
+in the DSN: the DSN is stored as plain text in the registry. `taro env create`/`add` warn about a password in the DSN,
+and `taro env list` masks it. Set passwords with `\password`, which sends them hashed, so they don't end up in SQL
+history or server logs.
+
+### Connection security
+
+- **A dedicated database** is recommended, not required. runtools creates and drops only its own `runtools_…`
+  schemas, but advisory locks, which coordinate jobs, are shared by the whole database: any login that can connect
+  could hold a lock key and block a mutex or queue. A dedicated database limits that to runtools logins and keeps
+  `CREATE` on the database and beta schema resets away from other data. For a hard boundary between teams, give each
+  its own database.
+- **Who can connect:** login roles and `pg_hba.conf` (or your managed service's equivalent) — limit it to the
+  machines that run or watch jobs.
+- **Pooling:** connect directly or through a session-mode pooler, not a transaction-mode one — coordination relies on
+  session-level advisory locks.
+
+### Job output
+
+PostgreSQL holds only the live tail (`taro tail` while a job runs, and briefly after). Complete output lives in the
+environment's output storage, which has its own access control: with S3, nodes need write access to the bucket and
+anyone running `taro output` on finished runs needs read access — see
+[Output storage across machines](environment.md#output-storage-across-machines). A viewer without S3 credentials can
+watch running jobs but not read finished runs' full output.
+
+### Who did what
+
+runtools records no identities. Separate logins make attribution possible through PostgreSQL's own logging — for
+example `log_line_prefix` with `%u` (the login), and a `log_statement` level that covers the operations you care
+about. Logs show the original login even when a session switches roles (`session_user`).
+
+### Troubleshooting
+
+| Error | Cause |
+|---|---|
+| `permission denied for table signals` | the login isn't an operator in this environment |
+| `must be owner of schema …` | only the environment's admin can do this |
+| `relation "schema_info" does not exist` | the login may lack `USAGE` on the schema — check its profile was granted on this environment |
+| `No environment 'billing' at that location` (`env add`) | wrong environment name or DSN, or the environment wasn't created yet |
+| `Roles not found: …` (`env create --grant-profiles`) | create the profile roles first; nothing was created |
+| `root certificate file … does not exist` | install the CA — see [TLS](#tls) |
+| `server certificate for "…" does not match host name` | use the host name the certificate was issued for |
