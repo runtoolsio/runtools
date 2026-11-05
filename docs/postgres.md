@@ -29,10 +29,11 @@ run job -e billing -j backup …       # runs a job in it
 taro ps -e billing                   # shows its running jobs
 ```
 
-Every machine must use the same name: runtools finds the environment's schema in the database by it. Without `-e`,
-`run job` and `taro` use the built-in `local` environment while no other environment is registered. After that,
-`run job` still runs in `local` but warns, and `taro` asks which environment in a terminal and requires `-e` in
-scripts — so pass `-e` wherever a job belongs to a shared environment.
+Every machine must use the same name: runtools finds the environment's schema in the database by it.
+
+> **Note:** without `-e`, commands use the built-in `local` environment. Once another environment is registered,
+> `run job` still runs in `local` but warns, and `taro` asks which one (or, in scripts, requires `-e`). Always pass
+> `-e` for jobs that belong to a shared environment.
 
 Who touches what:
 
