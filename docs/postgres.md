@@ -118,11 +118,16 @@ CREATE ROLE runtools_operator NOLOGIN;
 CREATE ROLE runtools_viewer NOLOGIN;
 ```
 
-The profiles then need access to each environment. Do one or the other, never both:
+The profiles then need access to each environment:
 
-- **An existing environment**, like `billing`: run the [grants script](#granting-profiles-to-an-existing-environment)
-  once.
-- **A new environment**: create it with `--grant-profiles`, and no script is needed:
+- **An existing environment**, like `billing`: grant it once, on the machine that created it — only the login that
+  created an environment can grant access to it:
+
+  ```bash
+  taro env grant billing --profiles runtools
+  ```
+
+- **A new environment**: grant it as you create it:
 
   ```bash
   taro env create reporting --grant-profiles runtools --dsn "…"
@@ -192,11 +197,15 @@ CREATE ROLE billing_operator NOLOGIN; CREATE ROLE reporting_operator NOLOGIN;
 CREATE ROLE billing_viewer NOLOGIN;   CREATE ROLE reporting_viewer NOLOGIN;
 ```
 
-Give each set access to its own environment, as in use case 4 — one or the other, never both:
+Give each set access to its own environment, as in use case 4:
 
-- **Existing environments**, like `billing` and `reporting`: run the
-  [grants script](#granting-profiles-to-an-existing-environment) once per environment, with the prefix `billing`,
-  then `reporting`.
+- **Existing environments**, like `billing` and `reporting`:
+
+  ```bash
+  taro env grant billing --profiles billing
+  taro env grant reporting --profiles reporting
+  ```
+
 - **A new environment**: create it with `--grant-profiles`. Its roles (`payments_node`, `payments_operator`,
   `payments_viewer`) must exist first, created like the ones above — otherwise the command fails and creates nothing:
 
@@ -264,7 +273,7 @@ alice                    runtools_operator                         billing, repo
 ```
 
 A login can act in an environment only when both links exist. You make the first with `GRANT <profile> TO <login>`;
-runtools makes the second (`--grant-profiles`, or the grants script).
+runtools makes the second (`taro env grant`, or `--grant-profiles` on create).
 
 | Profile | For | Can | Cannot |
 |---|---|---|---|
@@ -282,39 +291,17 @@ runtools makes the second (`--grant-profiles`, or the grants script).
 
 ### Granting profiles
 
-`--grant-profiles PREFIX` grants the existing roles `PREFIX_node`, `PREFIX_operator` and `PREFIX_viewer` access to the
-new environment, in the same transaction that creates it: a missing role fails the command and nothing is created.
-runtools never creates roles or logins.
+runtools grants the existing roles `PREFIX_node`, `PREFIX_operator` and `PREFIX_viewer` access to an environment; it
+never creates roles or logins.
 
-#### Granting profiles to an existing environment
+- `taro env create NAME --grant-profiles PREFIX` grants in the same transaction that creates the environment.
+- `taro env grant NAME --profiles PREFIX` grants on an existing environment. Run it with the login that created the
+  environment, or a member of its [admin role](#admin-profiles). Any other login is refused, because PostgreSQL
+  would only warn and grant nothing. Repeating it is harmless.
 
-For an environment created without `--grant-profiles`, save this as `grants.sql` and run it as the environment's
-owner (or a member of its owner role), with the schema name from [What runtools creates](#what-runtools-creates):
-
-```sql
--- Grants an environment's profile roles <prefix>_node, _operator and _viewer — what
--- `taro env create --grant-profiles` does at creation. Run as a member of the schema's owner role:
---   psql ... -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=billing -f grants.sql
-\set node :prefix '_node'
-\set operator :prefix '_operator'
-\set viewer :prefix '_viewer'
-GRANT USAGE ON SCHEMA :"schema" TO :"node", :"operator", :"viewer";
-GRANT SELECT ON ALL TABLES IN SCHEMA :"schema" TO :"node", :"operator", :"viewer";
--- Nodes: record runs, publish output, consume commands
-GRANT INSERT, UPDATE ON :"schema".runs TO :"node";
-GRANT INSERT ON :"schema".run_tags TO :"node";
-GRANT INSERT, DELETE ON :"schema".output_tail TO :"node";
-GRANT DELETE ON :"schema".signals TO :"node";
--- Operators: send commands (stop, approve), mark-lost, clean, prune
-GRANT INSERT, DELETE ON :"schema".signals TO :"operator";
-GRANT UPDATE, DELETE ON :"schema".runs TO :"operator";
-GRANT DELETE ON :"schema".run_tags, :"schema".output_tail TO :"operator";
-```
-
-```bash
-psql "postgresql://runtools_user@db.internal/runtools_db?sslmode=verify-full" \
-  -v schema=runtools_billing_cacfdbb4fbf4 -v prefix=runtools -f grants.sql
-```
+Either way, a missing role fails the command, and nothing is created or granted.
+The exact grants are `_PROFILE_GRANTS` in
+[`runcore/db/postgres.py`](https://github.com/runtoolsio/runcore/blob/main/src/runtools/runcore/db/postgres.py).
 
 #### Admin profiles
 
@@ -404,6 +391,7 @@ about. Logs show the original login even when a session switches roles (`session
 | `must be owner of schema …` | only the environment's admin can do this |
 | `relation "schema_info" does not exist` | the login may lack `USAGE` on the schema — check its profile was granted on this environment |
 | `No environment 'billing' at that location` (`env add`) | wrong environment name or DSN, or the environment wasn't created yet |
-| `Roles not found: …` (`env create --grant-profiles`) | create the profile roles first; nothing was created |
+| `Roles not found: …` (`env create`, `env grant`) | create the profile roles first; nothing was created or granted |
+| `Not the owner of environment …` (`env grant`) | run it with the login that created the environment, or a member of its admin role |
 | `root certificate file … does not exist` | install the CA — see [TLS](#tls) |
 | `server certificate for "…" does not match host name` | use the host name the certificate was issued for |

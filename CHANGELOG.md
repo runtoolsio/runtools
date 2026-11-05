@@ -11,9 +11,10 @@ All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lo
   doesn't exist.
 - taro: `taro env create NAME --dsn DSN --grant-profiles PREFIX` grants the existing roles `PREFIX_node`,
   `PREFIX_operator` and `PREFIX_viewer` access to the new postgres environment, in the transaction that creates it —
-  a missing role fails the command and nothing is created. Replaces running `grants.sql` after `create`, which is
-  kept for environments created without the option.
-- Docs: PostgreSQL guide — per-environment permissions; `grants.sql` takes the role prefix (`-v prefix=…`).
+  a missing role fails the command and nothing is created. `taro env grant NAME --profiles PREFIX` does the same for
+  an existing environment, run with its owner's login — another login is refused, as PostgreSQL would only warn and
+  grant nothing. Both replace the guide's `grants.sql`.
+- Docs: PostgreSQL guide — a tutorial of use cases, simplest first, then a reference; per-environment permissions.
 
 ## 0.3.0b4 — 2026-10-29
 
