@@ -118,13 +118,15 @@ CREATE ROLE runtools_operator NOLOGIN;
 CREATE ROLE runtools_viewer NOLOGIN;
 ```
 
-The profiles then need access to `billing`. It already exists, so grant it once with the
-[grants script](#granting-profiles-to-an-existing-environment). An environment created from now on gets it right
-away:
+The profiles then need access to each environment. Do one or the other, never both:
 
-```bash
-taro env create reporting --grant-profiles runtools --dsn "…"
-```
+- **An existing environment**, like `billing`: run the [grants script](#granting-profiles-to-an-existing-environment)
+  once.
+- **A new environment**: create it with `--grant-profiles`, and no script is needed:
+
+  ```bash
+  taro env create reporting --grant-profiles runtools --dsn "…"
+  ```
 
 Now Bob's login — the administrator runs:
 
@@ -190,14 +192,17 @@ CREATE ROLE billing_operator NOLOGIN; CREATE ROLE reporting_operator NOLOGIN;
 CREATE ROLE billing_viewer NOLOGIN;   CREATE ROLE reporting_viewer NOLOGIN;
 ```
 
-Give each set access to its environment with the [grants script](#granting-profiles-to-an-existing-environment),
-prefix `billing` and `reporting`. An environment created from now on gets its own set right away, once the
-administrator has created `payments_node`, `payments_operator` and `payments_viewer` like the roles above —
-otherwise the command fails and creates nothing:
+Give each set access to its own environment, as in use case 4 — one or the other, never both:
 
-```bash
-taro env create payments --grant-profiles payments --dsn "…"
-```
+- **Existing environments**, like `billing` and `reporting`: run the
+  [grants script](#granting-profiles-to-an-existing-environment) once per environment, with the prefix `billing`,
+  then `reporting`.
+- **A new environment**: create it with `--grant-profiles`. Its roles (`payments_node`, `payments_operator`,
+  `payments_viewer`) must exist first, created like the ones above — otherwise the command fails and creates nothing:
+
+  ```bash
+  taro env create payments --grant-profiles payments --dsn "…"
+  ```
 
 Then move Alice. Permissions add up, so she must also leave the shared operator profile — otherwise it still lets her
 stop jobs in `reporting`:
