@@ -5,6 +5,10 @@ All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lo
 
 ## 0.3.0b5 — unreleased
 
+- runcli: `run job` and `run env` without `-e` warn on stderr when other environments are registered — they still
+  use `local`, so registering an environment never stops existing jobs, but a job meant for a shared environment and
+  missing `-e` no longer runs there unnoticed. The `--env` help no longer mentions a default from config, which
+  doesn't exist.
 - taro: `taro env create NAME --dsn DSN --grant-profiles PREFIX` grants the existing roles `PREFIX_node`,
   `PREFIX_operator` and `PREFIX_viewer` access to the new postgres environment, in the transaction that creates it —
   a missing role fails the command and nothing is created. Replaces running `grants.sql` after `create`, which is
