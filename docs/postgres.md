@@ -21,9 +21,15 @@ database "runtools_db"                   ← you create it
 └── schema runtools_reporting_…          ← another environment
 ```
 
-The environment name (`billing` in this guide) is yours to choose — `taro env create billing` picks it, and jobs and
-`taro` select the environment by it (`run job -e billing …`, `taro ps -e billing`). Every machine must register the
-environment under the same name: the schema is found by it.
+You name the environment when you create it — `billing` in this guide:
+
+```bash
+taro env create billing …            # creates the environment named "billing"
+run job -e billing -j backup …       # runs a job in it
+taro ps -e billing                   # shows its running jobs
+```
+
+Every machine must use the same name: runtools finds the environment's schema in the database by it.
 
 Who touches what:
 
