@@ -32,7 +32,9 @@ bob                  runtools_viewer             billing, reporting
 2. runtools gives the profiles access to an environment: `taro env grant billing --profiles runtools` grants
    `runtools_node`, `runtools_operator` and `runtools_viewer`, so bob's `runtools_viewer` included.
 
-Grants only add access. Nobody loses what they already had, and the owner always keeps full access.
+Grants only add access. After `taro env grant billing --profiles runtools`, a later
+`taro env grant billing --profiles billing` gives the `billing_*` profiles access too, and the `runtools_*` profiles keep
+theirs. The owner always keeps full access.
 
 The use cases go from no permissions to fine-grained ones:
 
