@@ -12,6 +12,35 @@ You need a PostgreSQL server, runtools with the `postgres` extra on each machine
 in PostgreSQL — the SQL below runs in `psql` as a database administrator. The examples use the host `db.internal`,
 the database `runtools_db` and an environment named `billing`; use your own names.
 
+### How access works
+
+runtools has no users or passwords of its own; access is plain PostgreSQL. Three things are involved:
+
+- **Environment**: a schema runtools creates in your database, such as `billing`. Whoever creates it owns it and can
+  do everything in it.
+- **Login**: what a person or server connects with, such as `bob` or `build01`.
+- **Profile**: a permission level (viewer, operator or node), as a PostgreSQL group role such as `runtools_viewer`.
+
+A login can act in an environment only through a profile, which takes two grants:
+
+```text
+login ──member of──▶ profile ──has access to──▶ environment
+bob                  runtools_viewer             billing, reporting
+```
+
+1. The administrator puts the login in a profile, in SQL: `GRANT runtools_viewer TO bob`.
+2. runtools gives the profile access to an environment: `taro env grant billing --profiles runtools`.
+
+Grants only add access. Nobody loses what they already had, and the owner always keeps full access.
+
+The use cases go from no permissions to fine-grained ones:
+
+| Use cases | Logins | Rights |
+|---|---|---|
+| 1–3 | one shared login, the owner | everything, everywhere |
+| 4–6 | a login per person and server, in the shared `runtools_*` profiles | the same in every environment |
+| 7 | the same, in per-environment profiles such as `billing_viewer` | different in each environment |
+
 ### 1. Share jobs between two machines
 
 Everyone uses one PostgreSQL login. The administrator creates it with a database:
@@ -187,7 +216,9 @@ If that account already registered `billing` with the shared login ([use case 2]
 [use case 3](#3-secure-the-connection).
 
 The server can run jobs, but can't change the environment's settings or delete it. Once every person and server has
-its own login, nobody needs the shared `runtools_user` login except whoever administers the environment.
+its own login, nobody needs the shared `runtools_user` login except whoever administers the environment. It still has
+full access, so change its password (`\password runtools_user`) — the copies in other people's `~/.pgpass` stop
+working.
 
 ### 7. Separate teams
 
@@ -269,15 +300,8 @@ still runs in `local` but warns, and `taro` asks which one in a terminal and req
 
 ### Profiles and permissions
 
-runtools has no users or permission checks of its own — access is plain PostgreSQL privileges in two links:
-
-```text
-login    ──member of──▶  profile (group role)  ──has access to──▶  environment (schema)
-alice                    runtools_operator                         billing, reporting
-```
-
-A login can act in an environment only when both links exist. You make the first with `GRANT <profile> TO <login>`;
-runtools makes the second (`taro env grant`, or `--grant-profiles` on create).
+runtools has no permission checks of its own: a login acts through its profiles — see
+[How access works](#how-access-works). What each profile can do:
 
 | Profile | For | Can | Cannot |
 |---|---|---|---|
