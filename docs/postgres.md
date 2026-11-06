@@ -29,7 +29,8 @@ bob                  runtools_viewer             billing, reporting
 ```
 
 1. The administrator puts the login in a profile, in SQL: `GRANT runtools_viewer TO bob`.
-2. runtools gives the profile access to an environment: `taro env grant billing --profiles runtools`.
+2. runtools gives the profiles access to an environment: `taro env grant billing --profiles runtools` grants
+   `runtools_node`, `runtools_operator` and `runtools_viewer`, so bob's `runtools_viewer` included.
 
 Grants only add access. Nobody loses what they already had, and the owner always keeps full access.
 
