@@ -110,7 +110,7 @@ So far everyone shares one login and can do everything. To give Bob read-only ac
 | `runtools_operator` | also stopping, approving and cleaning up jobs |
 | `runtools_node` | machines that run jobs |
 
-The administrator creates them once:
+The administrator creates them once per PostgreSQL server:
 
 ```sql
 CREATE ROLE runtools_node NOLOGIN;
