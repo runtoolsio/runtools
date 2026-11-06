@@ -150,6 +150,9 @@ taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=ver
 He can watch (`taro ps`, `taro tail`, `taro history`), but `taro stop -e billing demo` is refused with
 `permission denied for table signals`.
 
+He can watch every environment the `runtools_*` profiles have access to — here `billing` and `reporting`.
+To limit him to one, see [use case 7](#7-separate-teams).
+
 ### 5. Let a teammate stop jobs
 
 Alice should also stop and approve jobs. With the profiles in place, it's one grant:
