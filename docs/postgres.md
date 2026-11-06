@@ -205,6 +205,7 @@ Give each set access to its own environment, as in use case 4:
 - **Existing environments**, like `billing` and `reporting`:
 
   ```bash
+  # taro env grant ENVIRONMENT --profiles PREFIX — each environment's profiles are named after it
   taro env grant billing --profiles billing
   taro env grant reporting --profiles reporting
   ```
