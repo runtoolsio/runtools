@@ -14,6 +14,13 @@ All five packages (runcore, runjob, runcli, taro, runtoolsio) are released in lo
   a missing role fails the command and nothing is created. `taro env grant NAME --profiles PREFIX` does the same for
   an existing environment, run with its owner's login — another login is refused, as PostgreSQL would only warn and
   grant nothing. Both replace the guide's `grants.sql`.
+- A refused database operation prints `Permission denied in environment 'billing': permission denied for table
+  signals` instead of a traceback — in taro, `run job`, and the TUI's delete, which also no longer closes the
+  dashboard. A login without access to the environment gets `permission denied for schema …` instead of
+  `relation "schema_info" does not exist`. runcore: postgres raises `PermissionDeniedError` (the psycopg error is its
+  cause).
+- taro: `taro env prune` removes only ended runs — `--keep-days 0` no longer fails while a matched job is running, and
+  `--keep-days N` no longer fails with a `TypeError` once runs older than N days exist.
 - Docs: PostgreSQL guide — a tutorial of use cases, simplest first, then a reference; per-environment permissions.
 
 ## 0.3.0b4 — 2026-10-29

@@ -180,7 +180,7 @@ taro env add billing --dsn "postgresql://bob@db.internal/runtools_db?sslmode=ver
 ```
 
 He can watch (`taro ps`, `taro tail`, `taro history`), but `taro stop -e billing demo` is refused with
-`permission denied for table signals`.
+`Permission denied in environment 'billing': permission denied for table signals`.
 
 He can watch every environment the `runtools_*` profiles have access to — here `billing` and `reporting`.
 To limit him to one, see [use case 7](#7-separate-teams).
@@ -416,11 +416,14 @@ about. Logs show the original login even when a session switches roles (`session
 
 ### Troubleshooting
 
+A refused operation reads `Permission denied in environment 'billing': …`, followed by PostgreSQL's message — the
+table lists that part.
+
 | Error | Cause |
 |---|---|
 | `permission denied for table signals` | the login isn't an operator in this environment |
 | `must be owner of schema …` | only the environment's admin can do this |
-| `relation "schema_info" does not exist` | the login may lack `USAGE` on the schema — check its profile was granted on this environment |
+| `permission denied for schema …` | the login has no profile granted on this environment — see [Granting profiles](#granting-profiles) |
 | `No environment 'billing' at that location` (`env add`) | wrong environment name or DSN, or the environment wasn't created yet |
 | `Roles not found: …` (`env create`, `env grant`) | create the profile roles first; nothing was created or granted |
 | `Not the owner of environment …` (`env grant`) | run it with the login that created the environment, or a member of its admin role |
