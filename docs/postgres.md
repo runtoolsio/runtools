@@ -44,9 +44,10 @@ The use cases go from no permissions to fine-grained ones:
 | 4–6 | a login per person and server, in the shared `runtools_*` profiles | the same in every environment |
 | 7 | the same, in per-environment profiles such as `billing_viewer` | different in each environment |
 
-### 1. Share jobs between two machines
+### Initial database setup
 
-Everyone uses one PostgreSQL login. The administrator creates it with a database:
+An administrator runs this once for the examples below. All seven use cases share this database. Initially, everyone
+connects as `runtools_user`; later, it remains available for administering environments.
 
 ```sql
 CREATE DATABASE runtools_db;
@@ -55,7 +56,10 @@ GRANT CREATE ON DATABASE runtools_db TO runtools_user;
 \password runtools_user
 ```
 
-On both machines, add the password to `~/.pgpass` and make the file private (`chmod 600 ~/.pgpass`):
+### 1. Share jobs between two machines
+
+Everyone connects as `runtools_user`. On both machines, add its password to `~/.pgpass` and make the file
+private (`chmod 600 ~/.pgpass`):
 
 ```text
 db.internal:5432:runtools_db:runtools_user:the-password
